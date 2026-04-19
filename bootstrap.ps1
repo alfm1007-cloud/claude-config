@@ -130,54 +130,58 @@ else {
 Write-Host "  ✅ ~/.claude 준비 완료" -ForegroundColor Green
 
 # ──────────────────────────────────────────
-# [7/7] settings.json (hook 병합)
+# [7/7] settings.json (hook 설정) — PS 5.1 호환
 # ──────────────────────────────────────────
 Step 7 7 "settings.json hook 설정"
 $settingsPath = "$claudeDir\settings.json"
-$hooksBlock = [ordered]@{
-    SessionStart = @(
-        [ordered]@{
-            matcher = ""
-            hooks = @(
-                [ordered]@{
-                    type = "command"
-                    command = "cd ~/.claude && git pull --ff-only 2>/dev/null || true"
-                }
-            )
-        }
-    )
-    Stop = @(
-        [ordered]@{
-            matcher = ""
-            hooks = @(
-                [ordered]@{
-                    type = "command"
-                    command = "cd ~/.claude && git diff --quiet && git diff --cached --quiet || (git add -A && git commit -m 'auto-sync: `$(date +%Y-%m-%d)' && git push)"
-                }
-            )
-        }
-    )
+
+# 표준 settings.json 템플릿 (here-string)
+$settingsTemplate = @'
+{
+  "enabledPlugins": {},
+  "enableAllProjectMcpServers": false,
+  "spinnerTipsEnabled": false,
+  "autoUpdatesChannel": "latest",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd ~/.claude && git pull --ff-only 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd ~/.claude && git diff --quiet && git diff --cached --quiet || (git add -A && git commit -m 'auto-sync: $(date +%Y-%m-%d)' && git push)"
+          }
+        ]
+      }
+    ]
+  }
 }
+'@
 
 if (Test-Path $settingsPath) {
-    $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json -AsHashtable
-    if (-not $settings.hooks) {
-        $settings.hooks = $hooksBlock
-        $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsPath -Encoding UTF8
-        Write-Host "  ✅ 기존 settings.json에 hook 병합" -ForegroundColor Green
-    } else {
+    $existing = Get-Content $settingsPath -Raw
+    if ($existing -match '"hooks"\s*:') {
         Write-Host "  ✅ hook 이미 설정됨 (건너뜀)" -ForegroundColor Green
+    } else {
+        $backup = "$settingsPath.backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Copy-Item $settingsPath $backup
+        Write-Host "  ⚠️  기존 settings.json 백업 ($backup) 후 hook 추가 필요" -ForegroundColor Yellow
+        Write-Host "     수동 병합 필요: README 3단계 JSON 블록 참고" -ForegroundColor Yellow
     }
 } else {
-    $newSettings = [ordered]@{
-        enabledPlugins = @{}
-        enableAllProjectMcpServers = $false
-        spinnerTipsEnabled = $false
-        autoUpdatesChannel = "latest"
-        hooks = $hooksBlock
-    }
-    $newSettings | ConvertTo-Json -Depth 10 | Set-Content $settingsPath -Encoding UTF8
-    Write-Host "  ✅ settings.json 신규 생성" -ForegroundColor Green
+    Set-Content -Path $settingsPath -Value $settingsTemplate -Encoding UTF8
+    Write-Host "  ✅ settings.json 신규 생성 (hook 포함)" -ForegroundColor Green
 }
 
 # Desktop\Claude 폴더 준비
