@@ -1,0 +1,20 @@
+# 민감한 파일
+.credentials.json
+mcp-needs-auth-cache.json
+session-env
+
+# 기기별 설정
+settings.json
+settings.local.json
+
+# 자동 생성
+backups/
+cache/
+downloads/
+plans/
+plugins/
+projects/
+sessions/
+shell-snapshots/
+skills/
+telemetry/
