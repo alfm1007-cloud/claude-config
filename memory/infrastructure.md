@@ -32,7 +32,7 @@
 | **Supabase** | DB + Auth | Publishable (`sb_publishable_...`) + Secret (`sb_secret_...`) | Render ENV / index.html은 Publishable만 |
 | **Anthropic Claude** | AI 분석 (Haiku) | `ANTHROPIC_API_KEY` | Render ENV |
 | **Web Push VAPID** | PWA 알림 | PUBLIC / PRIVATE | Render ENV, PUBLIC만 index.html 하드코딩 |
-| **NicePark** | 주차 등록 API | (키 확인 필요) | Render ENV |
+| **NicePark** | 주차 등록 API | `NICEPARK_ID` + `NICEPARK_PW` | Render ENV (swresort/server.js:299-301) |
 | **UptimeRobot** | keep-alive ping | 계정 로그인만 필요 | — |
 | **Sentry** | 에러 모니터링 | DSN | 성내동 프로젝트 코드 내 (DSN은 공개 OK) |
 
@@ -67,8 +67,13 @@
 | 성내동 | ✅ 연동됨 | `JAVASCRIPT-1` (Browser JavaScript SDK) |
 
 - 조직: `alfm1007-cloud's Org`
-- 성내동 프로젝트 코드에 Sentry SDK 설치됨 (init 위치·DSN 저장 방식 *확인 필요*)
-- Session Replay, Seer Autofix는 아직 미설정 (활성화 권장)
+- **SDK 설치 방식**: CDN bundle (`browser.sentry-cdn.com/8.47.0/bundle.min.js`)
+- **init 위치**: `성내동/public/index.html:10-38` (인라인 `<script>`)
+- **DSN**: `public/index.html:16` 평문 하드코딩 (DSN은 public 성격이라 OK, 환경변수 아님)
+- **무료 티어 보호 설정**: `tracesSampleRate: 0` / `replaysSessionSampleRate: 0` / `replaysOnErrorSampleRate: 0` → **에러 캡처만, Performance/Replay 비활성**
+- **사용자 식별**: `app.js:205-208` 에서 `Sentry.setUser({id, username, email})` + `setTag('store_id', 'role')`
+- **노이즈 필터**: ResizeObserver, NetworkError, 확장프로그램 URL 등 ignoreErrors/denyUrls 등록됨
+- Seer Autofix는 아직 미설정 (활성화 권장)
 - 오류 확인 경로: Sentry 대시보드 → Issues → 해당 프로젝트
 
 ## 6. 로그 확인 경로 (프로젝트 전반)
