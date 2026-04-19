@@ -7,20 +7,11 @@
 
 ## 🎯 행동대장 메뉴얼 — 무르가 실제로 해야 할 것
 
-### 시나리오 A. 🆕 새 PC에서 처음 설치 (한 줄 부트스트랩 ⭐)
+### 시나리오 A. 🆕 새 PC에서 처음 설치
+👉 **`SETUP.md` 보세요** — https://github.com/alfm1007-cloud/claude-config/blob/master/SETUP.md
+(휴대폰 북마크용 한 장 매뉴얼. PowerShell 한 줄로 끝)
 
-**PowerShell 한 줄 (관리자 권한 권장):**
-```powershell
-irm https://raw.githubusercontent.com/alfm1007-cloud/claude-config/master/bootstrap.ps1 | iex
-```
-
-→ Node.js + Git + GitHub CLI + Claude Code 설치 + `~/.claude` 클론 + hook 자동 설정.
-→ 끝나면 안내대로 (1) `claude` 로그인 (2) `gh auth login` (3) 프로젝트 폴더 클론.
-
-**옛날 방식 (Claude에게 시키기):** 클로드 켜고 한 줄
-> **"깃허브 alfm1007-cloud/claude-config 리드미 보고 순서대로 실행해줘"**
-
-→ Claude가 아래 "자동 실행 지시서" 섹션을 읽고 1~5단계 수행.
+**bootstrap.ps1 실패 시 백업 경로**: 아래 "Claude에게 자동 실행 지시서" 섹션을 Claude에게 시키면 수동으로 같은 작업 수행.
 
 ### 시나리오 B. 🔄 다른 PC 옮겨서 이어 작업
 **아무것도 안 해도 됨** (SessionStart hook이 자동 `git pull`).
