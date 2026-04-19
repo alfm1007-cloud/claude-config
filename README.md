@@ -23,8 +23,9 @@
 
 ### 시나리오 D. 🆕 새 프로젝트 시작
 프로젝트 폴더 만들고 Claude에게:
-> **"성내동/CLAUDE.md 포맷 참고해서 이 프로젝트 CLAUDE.md 만들어줘"**
+> **"이 프로젝트 CLAUDE.md 만들어줘"**
 
+→ Claude는 자동으로 `~/.claude/ref/project_template.md` (13섹션 뼈대)를 참조해 새 CLAUDE.md를 작성한다.
 → 프로젝트 고유 내용만 그 폴더 CLAUDE.md에, 전역 규칙은 `~/.claude/ref/rules.md` 참조.
 
 ### 시나리오 E. 🧠 원칙 확인
@@ -146,7 +147,7 @@ Claude Code 재시작 후:
 | 다른 PC 이어 작업 | 없음 | SessionStart hook → 자동 pull |
 | hook 실패/충돌 | `/sync` | 수동 동기화 |
 | 새 PC | "리드미 보고 실행해줘" | Claude가 이 파일대로 실행 |
-| 새 프로젝트 | "성내동 포맷으로 CLAUDE.md 만들어줘" | Claude가 생성 |
+| 새 프로젝트 | "이 프로젝트 CLAUDE.md 만들어줘" | Claude가 `project_template.md` 참조해 생성 |
 
 ---
 

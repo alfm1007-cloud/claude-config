@@ -8,6 +8,8 @@
 
 ## 필요 시 읽기
 - `~/.claude/ref/errors.md` — 범용 오류/배포 체크리스트
+- `~/.claude/ref/project_template.md` — **새 프로젝트 CLAUDE.md 만들 때 이 13섹션 뼈대 사용**
+- `~/.claude/memory/infrastructure.md` — **무르 인프라 프로필 (배포/Supabase/Sentry/UptimeRobot)**. 배포·키·모니터링 관련 질문 들어오면 먼저 확인
 - `~/.claude/memory/user_identity.md` · `dev_context.md` · `planning_context.md` · `design_context.md`
 - 프로젝트 작업 시 해당 폴더의 `CLAUDE.md` 자동 로드 (swresort / agoda-auto / 성내동 등)
 
