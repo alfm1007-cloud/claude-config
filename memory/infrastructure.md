@@ -21,7 +21,7 @@
 
 | 프로젝트 | 서버/API | 정적/프론트 | URL |
 |---------|---------|------------|-----|
-| **swresort** | Render | Render (통합) | automatereservationcharacters.netlify.app *(Netlify 임시 잔존)* |
+| **swresort** | Render | Render (통합) | `swresort.onrender.com` *(Netlify 임시 잔존: automatereservationcharacters.netlify.app)* |
 | **성내동** | Render | Render | https://store-management-system-1u64.onrender.com/ |
 | **agoda-auto** | 로컬 Node만 | — | — |
 
@@ -55,9 +55,10 @@
 
 **2중 체계**:
 1. **내부**: 각 프로젝트 `server.js` 안의 `node-cron`이 14분마다 `/keep-alive` 자기 핑
-2. **외부**: **UptimeRobot**에서 프로젝트 URL 주기적 HTTP 체크
-   - 대시보드 로그인 계정: 무르 Google 계정 추정 *(확인 필요)*
-   - 체크 주기·알림 채널 *(확인 필요)*
+2. **외부**: **UptimeRobot** Free 플랜 (50 monitors 중 2개 사용)
+   - **모니터 1**: `https://swresort.onrender.com/keep-alive` — 10분 주기 HTTP
+   - **모니터 2**: `https://store-management-system-1u64.onrender.com/health` — 10분 주기 HTTP
+   - 알림 채널: 기본값 (UptimeRobot 가입 이메일)
 
 ## 5. 에러 모니터링 (Sentry)
 
@@ -99,17 +100,18 @@
 - [ ] 1Password/Bitwarden에 프로젝트별 키 볼트 하나 만들기 → Render ENV는 "복사본"이 됨. 분실 위험 ↓
 - [ ] 한 달에 한 번 Render ENV 목록을 마스터 문서에 스냅샷
 
-## 8. 도메인 / DNS *(확인 필요)*
+## 8. 도메인 / DNS
 
-| 도메인 | 용도 | 등록기관 | DNS 콘솔 |
-|--------|------|---------|----------|
-| swresort.kr | 신원리조트 마케팅 | ? | ? |
-| 라마다호텔앤리조트.kr | 브랜드 | ? | ? |
-| ramada-taebaek.com | 라마다태백 예약 | ? | ? |
-| automatereservationcharacters.netlify.app | swresort 임시 | Netlify | Netlify DNS |
-| store-management-system-1u64.onrender.com | 성내동 | Render | Render DNS |
+**커스텀 도메인 없음.** 모두 Render 기본 서브도메인 사용.
 
-→ 커스텀 도메인 붙일 시 무르가 DNS 콘솔 정보 업데이트.
+| URL | 프로젝트 | 비고 |
+|-----|---------|------|
+| `swresort.onrender.com` | swresort | Render 기본 |
+| `store-management-system-1u64.onrender.com` | 성내동 | Render 기본 |
+| `automatereservationcharacters.netlify.app` | swresort (임시) | Netlify 잔존, 별도 요청 없으면 무시 |
+
+> swresort.kr / 라마다호텔앤리조트.kr / ramada-taebaek.com 등은 **외부 마케팅용 사이트**로 이 인프라와 무관.
+> 커스텀 도메인 붙이게 되면 그 때 등록기관/DNS 콘솔 추가 박제.
 
 ---
 
