@@ -1,7 +1,9 @@
 # 🆕 새 PC 무르 Claude 셋업
 
-> 이 파일 하나만 보면 됩니다. 휴대폰에 북마크 추천.
-> 직접 보기: https://github.com/alfm1007-cloud/claude-config/blob/master/SETUP.md
+> **Claude Code에게 셋업을 맡길 거면 → `MANUAL.md`** (Claude가 읽고 자동 실행)
+> **사람이 직접 진행할 거면 → 이 파일 (SETUP.md)**
+>
+> 휴대폰에 북마크 추천. 직접 보기: https://github.com/alfm1007-cloud/claude-config/blob/master/SETUP.md
 
 ---
 

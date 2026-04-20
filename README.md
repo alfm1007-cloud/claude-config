@@ -7,9 +7,18 @@
 
 ## 🎯 행동대장 메뉴얼 — 무르가 실제로 해야 할 것
 
-### 시나리오 A. 🆕 새 PC에서 처음 설치
-👉 **`SETUP.md` 보세요** — https://github.com/alfm1007-cloud/claude-config/blob/master/SETUP.md
-(휴대폰 북마크용 한 장 매뉴얼. PowerShell 한 줄로 끝)
+### 시나리오 A. 🆕 새 PC/외근 노트북에서 처음 설치
+
+**A-1. Claude Code에게 전부 맡기기 ⭐ 권장**
+1. 노트북에 Claude Desktop + Claude Code CLI 설치 후 `claude` 로그인
+2. 첫 세션에서 한마디:
+   > **"깃허브 매뉴얼 확인하고 셋업해줘"**
+3. Claude Code가 https://github.com/alfm1007-cloud/claude-config/blob/master/MANUAL.md 를 읽고 Phase 0~3 자동 실행
+4. 중간에 `gh auth login` 등 대면 인증 2~3번만 수동
+
+**A-2. 직접 하기**
+👉 **`SETUP.md`** — https://github.com/alfm1007-cloud/claude-config/blob/master/SETUP.md
+(휴대폰 북마크용. PowerShell 한 줄로 끝)
 
 **bootstrap.ps1 실패 시 백업 경로**: 아래 "Claude에게 자동 실행 지시서" 섹션을 Claude에게 시키면 수동으로 같은 작업 수행.
 
