@@ -45,6 +45,11 @@ gh auth login
 ```
 → GitHub.com → HTTPS → 브라우저 → **GitHub 로그인**
 
+> **중요**: `gh auth login` **이후에** bootstrap이 건너뛴 private 레포(`claude-projects-sync`, 대화내역) clone이 필요합니다. 자동 안 됐다면:
+> ```powershell
+> git clone https://github.com/alfm1007-cloud/claude-projects-sync.git $HOME\.claude\projects
+> ```
+
 ---
 
 ## 5️⃣ 검증

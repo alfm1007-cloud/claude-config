@@ -130,6 +130,42 @@ else {
 Write-Host "  ✅ ~/.claude 준비 완료" -ForegroundColor Green
 
 # ──────────────────────────────────────────
+# [6.5/7] 대화내역 clone (private 레포)
+# ──────────────────────────────────────────
+Step "6.5" 7 "대화내역 동기화 (private)"
+$projDir = "$claudeDir\projects"
+$projRepo = "https://github.com/alfm1007-cloud/claude-projects-sync.git"
+
+if (Test-Path "$projDir\.git") {
+    Write-Host "  🔄 projects/ 이미 git 저장소 → pull"
+    Push-Location $projDir
+    try { git pull --ff-only 2>$null } catch { }
+    Pop-Location
+}
+elseif (Test-Path $projDir) {
+    # bootstrap이 만든 빈 폴더거나 claude-config에 실수로 섞인 경우
+    $isEmpty = -not (Get-ChildItem $projDir -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($isEmpty) {
+        Remove-Item $projDir -Recurse -Force
+        git clone $projRepo $projDir 2>$null
+    } else {
+        $backup = "$projDir.backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Write-Host "  ⚠️  기존 projects/ 백업 → $backup"
+        Move-Item $projDir $backup
+        git clone $projRepo $projDir 2>$null
+    }
+}
+else {
+    Write-Host "  📥 git clone $projRepo"
+    git clone $projRepo $projDir 2>$null
+}
+if (Test-Path "$projDir\.git") {
+    Write-Host "  ✅ 대화내역 동기화 준비 완료" -ForegroundColor Green
+} else {
+    Write-Host "  ⚠️  private 레포 clone 실패 — gh auth login 후 수동: git clone $projRepo $projDir" -ForegroundColor Yellow
+}
+
+# ──────────────────────────────────────────
 # [7/7] settings.json (hook 설정) — PS 5.1 호환
 # ──────────────────────────────────────────
 Step 7 7 "settings.json hook 설정"
@@ -149,7 +185,7 @@ $settingsTemplate = @'
         "hooks": [
           {
             "type": "command",
-            "command": "cd ~/.claude && git pull --ff-only 2>/dev/null || true"
+            "command": "for d in ~/.claude ~/.claude/projects; do [ -d \"$d/.git\" ] && (cd \"$d\" && git pull --ff-only 2>/dev/null); done; true"
           }
         ]
       }
@@ -160,7 +196,7 @@ $settingsTemplate = @'
         "hooks": [
           {
             "type": "command",
-            "command": "cd ~/.claude && git diff --quiet && git diff --cached --quiet || (git add -A && git commit -m 'auto-sync: $(date +%Y-%m-%d)' && git push)"
+            "command": "for d in ~/.claude ~/.claude/projects; do [ -d \"$d/.git\" ] && (cd \"$d\" && (git diff --quiet && git diff --cached --quiet || (git add -A && git commit -m \"auto-sync: $(date +%Y-%m-%d)\" && git push))); done; true"
           }
         ]
       }
