@@ -94,4 +94,43 @@ except Exception as e:
     print(f'(오류: {e})')
 
 print(f'{"="*60}\n')
+
+# ── Write(전체 덮어쓰기) 전 Read 이력 체크 ──────────────────────
+import time
+
+is_write = 'content' in d   # Write 도구 = content 키 / Edit = old_string+new_string
+
+if is_write and os.path.isfile(fp):
+    TRACKER = '/tmp/claude_read_tracker.txt'
+    WINDOW  = 1800   # 30분 이내 Read면 OK
+    now     = time.time()
+    recently_read = False
+
+    if os.path.exists(TRACKER):
+        try:
+            with open(TRACKER) as tf:
+                for line in tf:
+                    parts = line.strip().split('\t', 1)
+                    if len(parts) == 2:
+                        ts_str, tp = parts
+                        try:
+                            if (os.path.abspath(os.path.expanduser(tp))
+                                    == os.path.abspath(os.path.expanduser(fp))
+                                    and now - float(ts_str) < WINDOW):
+                                recently_read = True
+                                break
+                        except ValueError:
+                            pass
+        except Exception:
+            pass   # 트래커 읽기 실패 시 차단 안 함
+
+    if not recently_read:
+        print(
+            f'\n🚫 [Write 차단] 기존 파일 전체 덮어쓰기 전 Read 미확인\n'
+            f'   파일: {os.path.basename(fp)}\n'
+            f'   → Read 도구로 먼저 파일을 읽은 후 Write 진행하세요.\n'
+            f'   → 새 파일 생성이면 이 경고는 무시됩니다 (파일 존재 체크 오탐).\n'
+        )
+        sys.exit(2)   # exit 2 = Claude Code 차단
+
 sys.exit(0)

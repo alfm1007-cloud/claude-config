@@ -1,0 +1,891 @@
+// 창 지정 클릭 매크로 — 지정한 프로그램 창에 일정 간격마다 마우스 왼쪽 클릭 또는 키보드 키 입력
+// - 누르는 시간을 정하면 그만큼 꾹 누르고 있다가 뗌 (누르는 중에도 F8·창 닫기로 즉시 뗌)
+// - 다른 작업 중에도 동작: 누르는 동안만 대상 창을 앞으로 → 누름 → 원래 창·마우스 위치로 복귀
+// - 대상 창이 최소화돼 있으면 잠깐 복원했다가 다시 최소화
+// - 설치 불필요: Windows 10/11 에 기본 포함된 .NET Framework 만 사용 (exe 1개로 실행)
+//
+// 주의: 온라인 게임은 자동 입력을 이용약관으로 금지하는 경우가 있습니다. 허용 여부는 본인 확인.
+//
+// 빌드 (Windows 내장 컴파일러, 이 폴더에서):
+//   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /codepage:65001 /target:winexe /optimize+ /out:클릭매크로.exe ClickMacro.cs
+
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Globalization;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+
+static class Native
+{
+    public const int VK_TOGGLE = 0x77;      // F8: 시작/정지
+    public const int VK_CAPTURE = 0x76;     // F7: 클릭 위치 저장
+    public const byte VK_MENU = 0x12;
+    public const uint INPUT_MOUSE = 0;
+    public const uint INPUT_KEYBOARD = 1;
+    public const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+    public const uint KEYEVENTF_SCANCODE = 0x0008;
+    public const uint MOUSEEVENTF_MOVE = 0x0001;
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    public const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
+    public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
+    public const int SM_XVIRTUALSCREEN = 76;
+    public const int SM_YVIRTUALSCREEN = 77;
+    public const int SM_CXVIRTUALSCREEN = 78;
+    public const int SM_CYVIRTUALSCREEN = 79;
+    public const int SW_MINIMIZE = 6;
+    public const int SW_RESTORE = 9;
+    public const uint GA_ROOT = 2;
+    public const uint DWMWA_CLOAKED = 14;
+    public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public UIntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public UIntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Explicit)]
+    public struct InputUnion
+    {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT { public uint type; public InputUnion u; }
+
+    public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int cmd);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT pt);
+    [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hwnd, ref POINT pt);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT pt);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT pt);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern uint SendInput(uint count, INPUT[] inputs, int size);
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint code, uint mapType);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool QueryFullProcessImageName(IntPtr handle, uint flags, StringBuilder name, ref uint size);
+    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, uint attr, out int value, uint size);
+    [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
+    [DllImport("winmm.dll")] public static extern uint timeBeginPeriod(uint ms);
+}
+
+class WindowInfo
+{
+    public IntPtr Hwnd;
+    public string Title;
+    public string Exe;
+}
+
+static class Clicker
+{
+    const double HoverSec = 0.09;      // 누르기 전에 커서를 그 지점에 붙잡아 두는 시간 (게임이 '버튼 위'로 인식할 프레임 확보)
+    const double HoldSec = 0.06;       // 짧게 누를 때(누르는 시간 0) 누르고 있는 시간 (프레임 폴링 게임 인식용)
+    const double RestoreSec = 0.3;     // 최소화 복원 후 대기 (애니메이션이 끝나야 창 좌표가 확정됨)
+
+    static readonly Stopwatch Clock = Stopwatch.StartNew();
+    public static double Now { get { return Clock.Elapsed.TotalSeconds; } }
+
+    static void Sleep(double sec) { System.Threading.Thread.Sleep((int)(sec * 1000)); }
+
+    // ---------- 창 찾기 ----------
+    static string ExeName(uint pid)
+    {
+        IntPtr handle = Native.OpenProcess(Native.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (handle == IntPtr.Zero) return "";
+        try
+        {
+            var buf = new StringBuilder(1024);
+            uint size = (uint)buf.Capacity;
+            return Native.QueryFullProcessImageName(handle, 0, buf, ref size) ? Path.GetFileName(buf.ToString()) : "";
+        }
+        finally { Native.CloseHandle(handle); }
+    }
+
+    // 화면에 실제로는 안 보이는 숨은 창(백그라운드 UWP 앱 등) 여부
+    static bool IsCloaked(IntPtr hwnd)
+    {
+        int cloaked;
+        Native.DwmGetWindowAttribute(hwnd, Native.DWMWA_CLOAKED, out cloaked, sizeof(int));
+        return cloaked != 0;
+    }
+
+    // 제목이 있는 최상위 창 목록. 최소화된 창 포함, 이 프로그램 자신은 제외
+    public static List<WindowInfo> ListWindows()
+    {
+        var found = new List<WindowInfo>();
+        uint ownPid = (uint)Process.GetCurrentProcess().Id;
+        Native.EnumWindows(delegate(IntPtr hwnd, IntPtr lParam)
+        {
+            int length = Native.GetWindowTextLength(hwnd);
+            if (length > 0 && Native.IsWindowVisible(hwnd) && !IsCloaked(hwnd))
+            {
+                uint pid;
+                Native.GetWindowThreadProcessId(hwnd, out pid);
+                string exe = ExeName(pid);
+                if (pid != ownPid && exe.Length > 0)
+                {
+                    var buf = new StringBuilder(length + 1);
+                    Native.GetWindowText(hwnd, buf, buf.Capacity);
+                    found.Add(new WindowInfo { Hwnd = hwnd, Title = buf.ToString(), Exe = exe });
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    // 저장해 둔 exe·제목으로 대상 창을 고른다.
+    // 같은 exe 창이 여럿인데 제목까지 같은 창이 없으면 엉뚱한 창을 누르지 않도록 null
+    public static WindowInfo MatchWindow(List<WindowInfo> windows, string exe, string title)
+    {
+        List<WindowInfo> sameExe = windows.FindAll(w => string.Equals(w.Exe, exe, StringComparison.OrdinalIgnoreCase));
+        foreach (WindowInfo w in sameExe)
+            if (w.Title == title) return w;
+        return sameExe.Count == 1 ? sameExe[0] : null;
+    }
+
+    // ---------- 클릭 ----------
+    // hwnd를 맨 앞 창으로. Windows는 백그라운드 프로그램의 창 전환을 막으므로 Alt 입력으로 잠금을 푼다
+    static bool Activate(IntPtr hwnd)
+    {
+        if (Native.GetForegroundWindow() == hwnd) return true;
+        Native.keybd_event(Native.VK_MENU, 0, 0, UIntPtr.Zero);
+        Native.SetForegroundWindow(hwnd);
+        Native.keybd_event(Native.VK_MENU, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+        double deadline = Now + 0.5;
+        while (Now < deadline)
+        {
+            if (Native.GetForegroundWindow() == hwnd) return true;
+            Sleep(0.01);
+        }
+        return false;
+    }
+
+    // 화면 좌표 (x, y)로 커서를 옮기면서 buttonFlags(누름/뗌, 없으면 0)를 같은 순간에 처리하는 입력 1건.
+    // 절대 좌표는 전체 화면(다중 모니터 포함)을 0~65535로 나눈 값으로 보낸다
+    static Native.INPUT MouseAt(int x, int y, uint buttonFlags)
+    {
+        long left = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN), top = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
+        long width = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN), height = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
+        var input = new Native.INPUT { type = Native.INPUT_MOUSE };
+        input.u.mi.dx = (int)(((x - left) * 65536 + width - 1) / width);      // 올림: 되돌려 계산하면 정확히 그 픽셀
+        input.u.mi.dy = (int)(((y - top) * 65536 + height - 1) / height);
+        input.u.mi.dwFlags = Native.MOUSEEVENTF_MOVE | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK | buttonFlags;
+        return input;
+    }
+
+    // 키보드 키 입력 1건. 게임은 가상 키 코드가 아니라 하드웨어 스캔 코드로 키를 읽는 경우가 많아 스캔 코드로 보낸다
+    static Native.INPUT Key(ushort vk, bool up)
+    {
+        var input = new Native.INPUT { type = Native.INPUT_KEYBOARD };
+        input.u.ki.wScan = (ushort)Native.MapVirtualKey(vk, 0);      // 0 = 가상 키 → 스캔 코드
+        input.u.ki.dwFlags = Native.KEYEVENTF_SCANCODE | (up ? Native.KEYEVENTF_KEYUP : 0) | (IsExtendedKey(vk) ? Native.KEYEVENTF_EXTENDEDKEY : 0);
+        return input;
+    }
+
+    // 방향키·Insert/Delete/Home/End/PageUp/PageDown 등은 '확장 키' 표시가 있어야 숫자패드 키와 구분된다
+    static bool IsExtendedKey(ushort vk)
+    {
+        return (vk >= 0x21 && vk <= 0x28) || vk == 0x2D || vk == 0x2E || vk == 0x2C || vk == 0x6F
+            || vk == 0x90 || vk == 0x5B || vk == 0x5C || vk == 0x5D || vk == 0xA3 || vk == 0xA5;
+    }
+
+    static void Send(params Native.INPUT[] inputs)
+    {
+        Native.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Native.INPUT)));
+    }
+
+    // sec 동안 커서를 (x, y)에 붙잡아 둔다 (사용자가 마우스를 움직여도 약 10ms마다 되돌림).
+    // wiggle: 1픽셀 왕복 — 커서가 '움직였다'는 입력이 있어야 버튼 위라고 인식하는 게임 대비
+    // 중간에 cancelled()가 true가 되면 false를 돌려준다
+    static bool Pin(int x, int y, double sec, bool wiggle, Func<bool> cancelled)
+    {
+        double until = Now + sec;
+        bool nudge = wiggle;
+        while (Now < until)
+        {
+            if (cancelled()) return false;
+            Send(MouseAt(x + (nudge ? 1 : 0), y, 0));
+            if (wiggle) nudge = !nudge;
+            Sleep(0.01);
+        }
+        return true;
+    }
+
+    static bool Wait(double sec, Func<bool> cancelled)
+    {
+        double until = Now + sec;
+        while (Now < until)
+        {
+            if (cancelled()) return false;
+            Sleep(0.01);
+        }
+        return true;
+    }
+
+    // 현재 마우스 위치를 대상 창 안쪽 영역 기준 비율(0~1)로. 창 밖이거나 최소화 상태면 false
+    public static bool CursorRatioIn(IntPtr hwnd, out double rx, out double ry)
+    {
+        rx = ry = 0;
+        Native.POINT pt;
+        Native.GetCursorPos(out pt);
+        Native.ScreenToClient(hwnd, ref pt);
+        Native.RECT rect;
+        Native.GetClientRect(hwnd, out rect);
+        if (!(0 <= pt.X && pt.X < rect.Right && 0 <= pt.Y && pt.Y < rect.Bottom)) return false;
+        rx = (double)pt.X / rect.Right;
+        ry = (double)pt.Y / rect.Bottom;
+        return true;
+    }
+
+    // 대상 창을 잠깐 앞으로 가져와 누르고 원래 상태로 되돌린다.
+    // keyVk가 0이면 (rx, ry) 비율 지점에 마우스 왼쪽, 아니면 그 키보드 키.
+    // holdSec 동안 누르고 있으며, 그 사이 cancelled()가 true가 되면 즉시 뗀다
+    public static bool PressInWindow(IntPtr hwnd, double rx, double ry, ushort keyVk, double holdSec,
+                                     Func<bool> cancelled, out string msg)
+    {
+        IntPtr prevFg = Native.GetForegroundWindow();
+        Native.POINT prevPos;
+        Native.GetCursorPos(out prevPos);
+        bool wasMin = Native.IsIconic(hwnd);
+        bool useKey = keyVk != 0;
+        bool pressed = false;
+        var release = new Native.INPUT();
+        try
+        {
+            if (wasMin)
+            {
+                Native.ShowWindow(hwnd, Native.SW_RESTORE);
+                Sleep(RestoreSec);
+            }
+            if (!Activate(hwnd))
+            {
+                msg = "대상 창을 앞으로 가져오지 못해 건너뜀";
+                return false;
+            }
+            double hold = Math.Max(HoldSec, holdSec);
+            bool finished;
+            if (useKey)
+            {
+                // 창이 바뀐 직후 게임이 입력을 받을 준비가 되도록 잠깐 기다린다
+                if (!Wait(HoverSec, cancelled))
+                {
+                    msg = "누르기 중단";
+                    return false;
+                }
+                Send(Key(keyVk, false));
+                release = Key(keyVk, true);
+                pressed = true;
+                finished = Wait(hold, cancelled);
+            }
+            else
+            {
+                Native.RECT rect;
+                Native.GetClientRect(hwnd, out rect);
+                var pt = new Native.POINT { X = (int)(rect.Right * rx), Y = (int)(rect.Bottom * ry) };
+                Native.ClientToScreen(hwnd, ref pt);
+                // 맨 앞 창이 된 직후 몇 ms 동안은 화면 겹침 순서가 아직 안 바뀌어 있으므로 기다리며 확인한다.
+                // 끝까지 다른 창(항상 위 창 등)이 그 지점을 덮고 있으면 엉뚱한 창을 누르게 되므로 중단
+                double deadline = Now + 0.5;
+                while (Native.GetAncestor(Native.WindowFromPoint(pt), Native.GA_ROOT) != hwnd)
+                {
+                    if (Now > deadline)
+                    {
+                        msg = "클릭 지점이 다른 창에 가려져 건너뜀";
+                        return false;
+                    }
+                    Sleep(0.01);
+                }
+                // 사용자가 마우스를 움직이는 중이면 누르기 직전에 커서가 밀려 엉뚱한 곳이 눌린다.
+                // 그래서 '그 지점으로 이동'과 '누름/뗌'을 입력 1건에 합쳐 보낸다.
+                // (이동·누름을 따로 2건으로 묶어 보내면 그 사이에 실제 마우스 움직임이 끼어드는 것을 실측함)
+                if (!Pin(pt.X, pt.Y, HoverSec, true, cancelled))
+                {
+                    msg = "누르기 중단";
+                    return false;
+                }
+                Send(MouseAt(pt.X, pt.Y, Native.MOUSEEVENTF_LEFTDOWN));
+                release = MouseAt(pt.X, pt.Y, Native.MOUSEEVENTF_LEFTUP);
+                pressed = true;
+                finished = Pin(pt.X, pt.Y, hold, false, cancelled);   // 누르는 동안에도 그 지점에 붙잡아 둔다
+            }
+            Send(release);
+            pressed = false;
+            Sleep(0.05);
+            if (!finished)
+            {
+                msg = "누르기 중단";
+                return false;
+            }
+            if (holdSec > 0) msg = string.Format("{0}초 누르기 완료", holdSec);
+            else msg = useKey ? "키 입력 완료" : "클릭 완료";
+            return true;
+        }
+        finally
+        {
+            if (pressed) Send(release);      // 오류로 빠져나가도 눌린 채로 남지 않게
+            if (wasMin) Native.ShowWindow(hwnd, Native.SW_MINIMIZE);
+            Native.SetCursorPos(prevPos.X, prevPos.Y);
+            if (prevFg != IntPtr.Zero && prevFg != hwnd && Native.IsWindow(prevFg)) Activate(prevFg);
+        }
+    }
+}
+
+class MainForm : Form
+{
+    const double RetrySec = 10;        // 클릭 실패 시 다음 간격까지 기다리지 않고 재시도하는 주기
+    const double MinIntervalSec = 1;
+
+    static readonly string ConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "click_config.json");
+
+    List<WindowInfo> windows = new List<WindowInfo>();   // 콤보박스에 표시 중인 창 목록
+    string targetExe, targetTitle;                        // 대상 프로그램 (미지정이면 null)
+    bool hasPos;
+    double posX, posY;                                    // 창 안쪽 영역 기준 (가로 비율, 세로 비율)
+    ushort keyVk;                                         // 키보드 동작일 때 누를 키 (미지정이면 0)
+    bool running, capturing;
+    double interval, nextDue, holdSec;
+    bool keyMode;                                         // 실행 중인 동작: true = 키보드, false = 마우스
+    bool busy;                                            // 누르는 중 (작업 스레드 실행 중)
+    volatile bool cancel;                                 // 누르는 중 즉시 떼라는 신호
+    System.Threading.Thread worker;
+    readonly HashSet<int> keysDown = new HashSet<int>();
+    string lastLog;
+
+    ComboBox combo, actionCombo;
+    Label posLabel, status;
+    TextBox minBox, secBox, holdBox, keyBox;
+    Button startBtn;
+    ListBox logBox;
+    readonly Timer timer = new Timer { Interval = 30 };
+
+    public MainForm()
+    {
+        BuildUi();
+        LoadConfig();
+        UpdateActionUi();
+        RefreshWindows();
+        ShowPos();
+        timer.Tick += delegate { OnTick(); };
+        timer.Start();
+        // 누르는 중에 창을 닫아도 버튼·키가 눌린 채로 남지 않게 뗄 때까지 기다린다
+        FormClosing += delegate
+        {
+            cancel = true;
+            if (worker != null && worker.IsAlive) worker.Join(2000);
+        };
+    }
+
+    static Label MakeLabel(string text)
+    {
+        return new Label { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 6, 6) };
+    }
+
+    static Button MakeButton(string text)
+    {
+        return new Button
+        {
+            Text = text, AutoSize = true, UseVisualStyleBackColor = true,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, 3, 0, 3)
+        };
+    }
+
+    void BuildUi()
+    {
+        SuspendLayout();
+        AutoScaleDimensions = new SizeF(96F, 96F);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        Text = "창 지정 클릭 매크로";
+        Font = SystemFonts.MessageBoxFont;
+        ClientSize = new Size(560, 420);
+        MinimumSize = new Size(480, 380);
+        Padding = new Padding(10);
+
+        var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 8 };
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        // 버튼 열은 고정 폭: AutoSize로 두면 3열에 걸친 줄(로그·안내문)의 폭이 이 열로 몰려 가운데 열이 좁아진다
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96F));
+        for (int row = 0; row < 8; row++)
+            table.RowStyles.Add(row == 6 ? new RowStyle(SizeType.Percent, 100F) : new RowStyle(SizeType.AutoSize));
+
+        table.Controls.Add(MakeLabel("대상 프로그램"), 0, 0);
+        combo = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, 3, 6, 3)
+        };
+        combo.SelectionChangeCommitted += delegate { OnSelect(); };
+        table.Controls.Add(combo, 1, 0);
+        Button refreshBtn = MakeButton("새로고침");
+        refreshBtn.Click += delegate { RefreshWindows(); };
+        table.Controls.Add(refreshBtn, 2, 0);
+
+        table.Controls.Add(MakeLabel("동작"), 0, 1);
+        var actionRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        actionCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140, Margin = new Padding(0, 3, 8, 3) };
+        actionCombo.Items.AddRange(new object[] { "마우스 왼쪽 클릭", "키보드 키" });
+        actionCombo.SelectedIndex = 0;
+        actionCombo.SelectionChangeCommitted += delegate { UpdateActionUi(); SaveConfig(); };
+        keyBox = new TextBox { ReadOnly = true, Width = 130, Margin = new Padding(0, 3, 0, 3), TextAlign = HorizontalAlignment.Center };
+        keyBox.KeyDown += delegate(object sender, KeyEventArgs e)
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            SetKey(e.KeyCode);
+        };
+        actionRow.Controls.Add(actionCombo);
+        actionRow.Controls.Add(keyBox);
+        table.Controls.Add(actionRow, 1, 1);
+
+        table.Controls.Add(MakeLabel("클릭 위치"), 0, 2);
+        posLabel = MakeLabel("");
+        table.Controls.Add(posLabel, 1, 2);
+        Button captureBtn = MakeButton("위치 지정");
+        captureBtn.Click += delegate { StartCapture(); };
+        table.Controls.Add(captureBtn, 2, 2);
+
+        table.Controls.Add(MakeLabel("간격"), 0, 3);
+        var intervalRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        minBox = new TextBox { Text = "15", Width = 50, Margin = new Padding(0, 3, 0, 3) };
+        secBox = new TextBox { Text = "0", Width = 50, Margin = new Padding(0, 3, 0, 3) };
+        intervalRow.Controls.Add(minBox);
+        intervalRow.Controls.Add(new Label { Text = "분", AutoSize = true, Margin = new Padding(3, 6, 12, 0) });
+        intervalRow.Controls.Add(secBox);
+        intervalRow.Controls.Add(new Label { Text = "초", AutoSize = true, Margin = new Padding(3, 6, 0, 0) });
+        table.Controls.Add(intervalRow, 1, 3);
+
+        table.Controls.Add(MakeLabel("누르는 시간"), 0, 4);
+        var holdRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        holdBox = new TextBox { Text = "0", Width = 50, Margin = new Padding(0, 3, 0, 3) };
+        holdRow.Controls.Add(holdBox);
+        holdRow.Controls.Add(new Label { Text = "초   (0 = 짧게 한 번)", AutoSize = true, Margin = new Padding(3, 6, 0, 0) });
+        table.Controls.Add(holdRow, 1, 4);
+
+        var runRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 8, 0, 0) };
+        startBtn = new Button
+        {
+            Text = "시작 (F8)", AutoSize = true, UseVisualStyleBackColor = true,
+            MinimumSize = new Size(90, 0), Margin = new Padding(0, 3, 0, 3)
+        };
+        startBtn.Click += delegate { ToggleRun(); };
+        status = new Label { Text = "정지됨", AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(10, 8, 0, 0) };
+        runRow.Controls.Add(startBtn);
+        runRow.Controls.Add(status);
+        table.Controls.Add(runRow, 0, 5);
+        table.SetColumnSpan(runRow, 3);
+
+        logBox = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false, Margin = new Padding(0, 8, 0, 0) };
+        table.Controls.Add(logBox, 0, 6);
+        table.SetColumnSpan(logBox, 3);
+
+        var hint = new Label
+        {
+            Text = "F8: 시작/정지 (누르고 있는 중에도 바로 뗌)\n"
+                 + "마우스 위치: '위치 지정'을 누른 뒤 누를 곳에 마우스를 올리고 F7\n"
+                 + "키보드 키: 키 칸을 클릭한 뒤 원하는 키를 누르기",
+            AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(0, 8, 0, 0)
+        };
+        table.Controls.Add(hint, 0, 7);
+        table.SetColumnSpan(hint, 3);
+
+        Controls.Add(table);
+        ResumeLayout(false);
+        PerformLayout();
+    }
+
+    // ---------- 대상 창 ----------
+    void RefreshWindows()
+    {
+        windows = Clicker.ListWindows();
+        combo.Items.Clear();
+        foreach (WindowInfo w in windows) combo.Items.Add(w.Title + "  ·  " + w.Exe);
+        if (targetExe == null)
+        {
+            // 처음 실행: 로블록스가 떠 있으면 기본 선택
+            foreach (WindowInfo w in windows)
+            {
+                if (w.Exe.StartsWith("robloxplayer", StringComparison.OrdinalIgnoreCase))
+                {
+                    targetExe = w.Exe;
+                    targetTitle = w.Title;
+                    SaveConfig();
+                    break;
+                }
+            }
+        }
+        if (targetExe == null) return;
+        WindowInfo match = Clicker.MatchWindow(windows, targetExe, targetTitle);
+        if (match != null)
+        {
+            combo.SelectedIndex = windows.IndexOf(match);
+        }
+        else
+        {
+            // 목록에 없는 항목(창 목록 범위 밖 인덱스)으로 표시만 해 둔다
+            combo.Items.Add(targetTitle + "  ·  " + targetExe + "  (실행 안 됨)");
+            combo.SelectedIndex = combo.Items.Count - 1;
+        }
+    }
+
+    void OnSelect()
+    {
+        int index = combo.SelectedIndex;
+        if (index < 0 || index >= windows.Count) return;
+        WindowInfo w = windows[index];
+        if (targetExe != null && !string.Equals(targetExe, w.Exe, StringComparison.OrdinalIgnoreCase))
+        {
+            hasPos = false;      // 다른 프로그램이면 기존 클릭 위치는 의미가 없음
+            ShowPos();
+        }
+        targetExe = w.Exe;
+        targetTitle = w.Title;
+        SaveConfig();
+    }
+
+    IntPtr FindTarget()
+    {
+        if (targetExe == null) return IntPtr.Zero;
+        WindowInfo w = Clicker.MatchWindow(Clicker.ListWindows(), targetExe, targetTitle);
+        return w != null ? w.Hwnd : IntPtr.Zero;
+    }
+
+    // ---------- 클릭 위치 ----------
+    void StartCapture()
+    {
+        if (targetExe == null)
+        {
+            Log("대상 프로그램을 먼저 선택하세요");
+            return;
+        }
+        capturing = true;
+        posLabel.Text = "클릭할 곳에 마우스를 올리고 F7 …";
+        posLabel.ForeColor = Color.FromArgb(0xCC, 0x66, 0x00);
+    }
+
+    void CapturePos()
+    {
+        IntPtr hwnd = FindTarget();
+        double rx = 0, ry = 0;
+        if (hwnd == IntPtr.Zero || !Clicker.CursorRatioIn(hwnd, out rx, out ry))
+        {
+            Log("마우스가 대상 창 안쪽에 있지 않습니다 (창이 최소화돼 있으면 띄운 뒤 다시 F7)");
+            return;
+        }
+        posX = rx;
+        posY = ry;
+        hasPos = true;
+        capturing = false;
+        ShowPos();
+        SaveConfig();
+        Log("클릭 위치 저장");
+    }
+
+    // ---------- 동작(마우스/키보드) ----------
+    void UpdateActionUi()
+    {
+        keyBox.Enabled = actionCombo.SelectedIndex == 1;
+        keyBox.Text = keyVk != 0 ? KeyName(keyVk) : "여기 클릭 후 키 입력";
+    }
+
+    void SetKey(Keys code)
+    {
+        if (code == Keys.F7 || code == Keys.F8)
+        {
+            Log("F7·F8은 매크로 단축키라 지정할 수 없습니다");
+            return;
+        }
+        keyVk = (ushort)code;
+        UpdateActionUi();
+        logBox.Focus();      // 다음 키 입력이 또 지정되지 않게 칸에서 빠져나온다
+        SaveConfig();
+        Log("키 지정: " + KeyName(keyVk));
+    }
+
+    static string KeyName(ushort vk)
+    {
+        var key = (Keys)vk;
+        if (key >= Keys.D0 && key <= Keys.D9) return ((char)('0' + (key - Keys.D0))).ToString();
+        switch (key)
+        {
+            case Keys.Return: return "Enter";
+            case Keys.ShiftKey: return "Shift";
+            case Keys.ControlKey: return "Ctrl";
+            case Keys.Menu: return "Alt";
+            default: return key.ToString();
+        }
+    }
+
+    void ShowPos()
+    {
+        posLabel.Text = hasPos
+            ? string.Format("창 왼쪽에서 {0:0.0}% · 위에서 {1:0.0}%", posX * 100, posY * 100)
+            : "미지정";
+        posLabel.ForeColor = SystemColors.ControlText;
+    }
+
+    // ---------- 실행 ----------
+    static bool ParseNumber(string text, out double value)
+    {
+        value = 0;
+        text = text.Trim();
+        return text.Length == 0 || double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+    }
+
+    bool TryGetInterval(out double total)
+    {
+        total = 0;
+        double min, sec;
+        if (!ParseNumber(minBox.Text, out min) || !ParseNumber(secBox.Text, out sec)) return false;
+        total = min * 60 + sec;
+        return total >= MinIntervalSec && !double.IsInfinity(total);
+    }
+
+    bool TryGetHold(out double hold)
+    {
+        return ParseNumber(holdBox.Text, out hold) && hold >= 0 && !double.IsInfinity(hold);
+    }
+
+    void ToggleRun()
+    {
+        if (running)
+        {
+            running = false;
+            cancel = true;       // 누르고 있는 중이면 바로 뗀다
+            status.Text = "정지됨";
+            status.ForeColor = Color.Gray;
+            startBtn.Text = "시작 (F8)";
+            Log("정지");
+            return;
+        }
+        double total, hold;
+        if (!TryGetInterval(out total))
+        {
+            Log(string.Format("간격은 {0}초 이상의 숫자여야 합니다", MinIntervalSec));
+            return;
+        }
+        if (!TryGetHold(out hold))
+        {
+            Log("누르는 시간은 0 이상의 숫자여야 합니다");
+            return;
+        }
+        bool useKey = actionCombo.SelectedIndex == 1;
+        if (targetExe == null)
+        {
+            Log("대상 프로그램을 먼저 선택하세요");
+            return;
+        }
+        if (useKey && keyVk == 0)
+        {
+            Log("누를 키를 먼저 지정하세요");
+            return;
+        }
+        if (!useKey && !hasPos)
+        {
+            Log("클릭 위치를 먼저 지정하세요");
+            return;
+        }
+        interval = total;
+        holdSec = hold;
+        keyMode = useKey;
+        cancel = false;
+        running = true;
+        nextDue = Clicker.Now + 1.0;     // 시작 직후 1회 클릭해 동작을 바로 확인
+        startBtn.Text = "정지 (F8)";
+        SaveConfig();
+        Log("시작");
+    }
+
+    static bool IsDown(int vk)
+    {
+        return (Native.GetAsyncKeyState(vk) & 0x8000) != 0;
+    }
+
+    void Fire()
+    {
+        // 마우스 버튼을 누르고 있는 중(드래그 등)이면 끝날 때까지 미룬다
+        if (IsDown(0x01) || IsDown(0x02) || IsDown(0x04))
+        {
+            nextDue = Clicker.Now + 0.5;
+            return;
+        }
+        IntPtr hwnd = FindTarget();
+        if (hwnd == IntPtr.Zero)
+        {
+            Finish(false, "대상 창을 찾지 못해 건너뜀");
+            return;
+        }
+        // 길게 누르는 동안에도 창이 멈추지 않고 F8을 받을 수 있게 누르기는 별도 스레드에서 한다
+        double rx = posX, ry = posY, hold = holdSec;
+        ushort vk = keyMode ? keyVk : (ushort)0;
+        busy = true;
+        worker = new System.Threading.Thread(delegate()
+        {
+            bool ok;
+            string msg;
+            try { ok = Clicker.PressInWindow(hwnd, rx, ry, vk, hold, () => cancel, out msg); }
+            catch (Exception e) { ok = false; msg = "오류: " + e.Message; }
+            try { BeginInvoke((Action)delegate { busy = false; Finish(ok, msg); }); }
+            catch (InvalidOperationException) { }    // 창이 닫히는 중
+        });
+        worker.IsBackground = true;
+        worker.Start();
+    }
+
+    void Finish(bool ok, string msg)
+    {
+        Log(msg);
+        nextDue = Clicker.Now + (ok ? interval : Math.Min(interval, RetrySec));
+    }
+
+    // 키가 '방금 눌린' 순간에만 true (누르고 있는 동안 반복 발동 방지)
+    bool Pressed(int vk)
+    {
+        bool down = IsDown(vk);
+        bool wasDown = keysDown.Contains(vk);
+        if (down) keysDown.Add(vk);
+        else keysDown.Remove(vk);
+        return down && !wasDown;
+    }
+
+    void OnTick()
+    {
+        try
+        {
+            if (Pressed(Native.VK_TOGGLE)) ToggleRun();
+            if (Pressed(Native.VK_CAPTURE) && capturing) CapturePos();
+            if (running && busy)
+            {
+                SetStatus("누르는 중 · F8로 바로 멈춤");
+            }
+            else if (running)
+            {
+                double remain = nextDue - Clicker.Now;
+                if (remain <= 0) Fire();
+                else SetStatus(string.Format("실행 중 · 다음 입력까지 {0}:{1:00}", (int)remain / 60, (int)remain % 60));
+            }
+        }
+        catch (Exception e)
+        {
+            Log("오류: " + e.Message);   // 한 번 오류가 나도 반복은 계속
+        }
+    }
+
+    // ---------- 헬퍼 ----------
+    void SetStatus(string text)
+    {
+        if (status.Text == text) return;
+        status.Text = text;
+        status.ForeColor = Color.Green;
+    }
+
+    void Log(string msg)
+    {
+        if (msg == lastLog && logBox.Items.Count > 0)
+            logBox.Items.RemoveAt(logBox.Items.Count - 1);   // 같은 메시지 반복(재시도 등)은 마지막 줄 시각만 갱신
+        lastLog = msg;
+        logBox.Items.Add(DateTime.Now.ToString("HH:mm:ss") + "  " + msg);
+        if (logBox.Items.Count > 200) logBox.Items.RemoveAt(0);
+        logBox.TopIndex = logBox.Items.Count - 1;
+    }
+
+    // ---------- 설정 저장/로드 ----------
+    void SaveConfig()
+    {
+        var data = new Dictionary<string, object>();
+        data["target"] = targetExe == null
+            ? null
+            : new Dictionary<string, object> { { "exe", targetExe }, { "title", targetTitle } };
+        data["pos"] = hasPos ? new double[] { posX, posY } : null;
+        data["min"] = minBox.Text;
+        data["sec"] = secBox.Text;
+        data["action"] = actionCombo.SelectedIndex == 1 ? "key" : "mouse";
+        data["key"] = (int)keyVk;
+        data["hold"] = holdBox.Text;
+        try
+        {
+            File.WriteAllText(ConfigPath, new JavaScriptSerializer().Serialize(data), new UTF8Encoding(false));
+        }
+        catch (Exception e)
+        {
+            Log("설정 저장 실패: " + e.Message);
+        }
+    }
+
+    void LoadConfig()
+    {
+        if (!File.Exists(ConfigPath)) return;
+        try
+        {
+            var data = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(ConfigPath, Encoding.UTF8));
+            object value;
+            var target = data.TryGetValue("target", out value) ? value as Dictionary<string, object> : null;
+            if (target != null)
+            {
+                targetExe = (string)target["exe"];
+                targetTitle = (string)target["title"];
+            }
+            var pos = data.TryGetValue("pos", out value) ? value as IList : null;
+            if (pos != null)
+            {
+                posX = Convert.ToDouble(pos[0], CultureInfo.InvariantCulture);
+                posY = Convert.ToDouble(pos[1], CultureInfo.InvariantCulture);
+                hasPos = true;
+            }
+            if (data.TryGetValue("min", out value) && value != null) minBox.Text = Convert.ToString(value, CultureInfo.InvariantCulture);
+            if (data.TryGetValue("sec", out value) && value != null) secBox.Text = Convert.ToString(value, CultureInfo.InvariantCulture);
+            if (data.TryGetValue("action", out value) && "key".Equals(value)) actionCombo.SelectedIndex = 1;
+            if (data.TryGetValue("key", out value) && value != null) keyVk = (ushort)Convert.ToInt32(value, CultureInfo.InvariantCulture);
+            if (data.TryGetValue("hold", out value) && value != null) holdBox.Text = Convert.ToString(value, CultureInfo.InvariantCulture);
+        }
+        catch (Exception)
+        {
+            Log("설정 파일을 읽지 못해 기본값으로 시작");
+        }
+    }
+
+    [STAThread]
+    static void Main()
+    {
+        // 좌표를 실제 픽셀로 다루기 위해 창을 만들기 전에 DPI 인식 설정 (지원 안 하는 Windows면 건너뜀)
+        try { Native.SetProcessDpiAwareness(2); }
+        catch (Exception) { }
+        // 기본 타이머는 15ms 단위라 짧은 대기가 늘어진다 → 1ms 단위로 (창을 꺼내 두는 시간 단축)
+        try { Native.timeBeginPeriod(1); }
+        catch (Exception) { }
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        Application.Run(new MainForm());
+    }
+}

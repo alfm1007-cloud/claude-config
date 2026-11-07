@@ -1,0 +1,20 @@
+﻿; Roblox DJ 배속 단축키 설정
+[General]
+; 단축키가 동작할 프로그램 이름 (작업 관리자 > 세부 정보의 이름에서 .exe를 뺀 것)
+TargetProcess=RobloxPlayerBeta
+; 1로 바꾸면 누른 키와 클릭 위치를 DjSpeed.log에 기록 (문제 확인용)
+Debug=1
+
+[Click]
+; 클릭 위치 (Roblox 창 안쪽, 제목 표시줄 아래 기준 픽셀)
+; 2026-10-23 측정: 모니터 2560x1440, Roblox 창 최대화, 애니메이션 패널 왼쪽에 열린 상태
+; 속도 슬라이더 막대 왼쪽 끝(x0) / 오른쪽 끝(x1.0) / 높이
+SliderLeft=127
+SliderRight=326
+SliderY=550
+; - 버튼, + 버튼 가운데
+MinusX=93
+MinusY=551
+PlusX=361
+PlusY=551
+ClickDelay=10

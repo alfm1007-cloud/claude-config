@@ -1,0 +1,77 @@
+"""마우스 위치 복귀만 재측정: 마우스가 멈춰 있을 때 실행하고, 반환 직후 바로 비교."""
+import ctypes
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+import time
+from ctypes import wintypes
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = r"C:\Users\alfm1\Desktop\Claude\click-macro\click_macro.pyw"
+OUT = os.path.join(HERE, "clicks2.txt")
+
+loader = importlib.machinery.SourceFileLoader("click_macro", SRC)
+spec = importlib.util.spec_from_loader("click_macro", loader)
+cm = importlib.util.module_from_spec(spec)
+loader.exec_module(cm)
+u = cm.user32
+
+
+def cursor():
+    p = wintypes.POINT()
+    u.GetCursorPos(ctypes.byref(p))
+    return p.x, p.y
+
+
+def wait_idle(still_sec=0.6, timeout=25):
+    """마우스가 still_sec 동안 안 움직일 때까지 대기. 성공 여부 반환."""
+    deadline = time.monotonic() + timeout
+    last, since = cursor(), time.monotonic()
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+        now = cursor()
+        if now != last:
+            last, since = now, time.monotonic()
+        elif time.monotonic() - since >= still_sec:
+            return True
+    return False
+
+
+if os.path.exists(OUT):
+    os.remove(OUT)
+fg0 = u.GetForegroundWindow()
+proc = subprocess.Popen([sys.executable, os.path.join(HERE, "test_target.py"), OUT])
+try:
+    target = None
+    for _ in range(50):
+        time.sleep(0.1)
+        target = cm.match_window(cm.list_windows(), os.path.basename(sys.executable), "ClickMacroTestTarget")
+        if target:
+            break
+    hwnd = target[0]
+    time.sleep(0.5)
+    if fg0 and u.GetForegroundWindow() != fg0:
+        cm._activate(fg0)
+
+    for label, minimized in (("백그라운드 창", False), ("최소화 창", True)):
+        if minimized:
+            u.ShowWindow(hwnd, cm.SW_MINIMIZE)
+            time.sleep(0.5)
+            if fg0 and u.GetForegroundWindow() != fg0:
+                cm._activate(fg0)
+        if not wait_idle():
+            print(f"[판정불가] {label}: 마우스가 계속 움직여 측정 못 함")
+            continue
+        before = cursor()
+        t0 = time.monotonic()
+        ok, msg = cm.click_in_window(hwnd, 0.5, 0.5)
+        elapsed = time.monotonic() - t0
+        after = cursor()
+        time.sleep(0.3)
+        later = cursor()
+        print(f"[{'PASS' if after == before else 'FAIL'}] {label}: 반환={ok}({msg}) "
+              f"소요={elapsed:.2f}s 직전={before} 직후={after} 0.3초뒤={later}")
+finally:
+    proc.kill()

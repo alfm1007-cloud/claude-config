@@ -1,0 +1,36 @@
+param([int]$Count = 10, [int]$ParkX = 200, [int]$Seed = 11)
+# After each F-key press, sample the slider value for 1.5s and print how it moves over time.
+. "$PSScriptRoot\rbx_common.ps1"
+if (-not (Focus-Roblox)) { "NOT_FOREGROUND"; exit 1 }
+$hwnd = Get-RobloxHwnd
+function Read-Level {
+  $bmp = Grab 100 561 260 4
+  $min = 9999; $max = -1
+  for ($yy = 0; $yy -lt 4; $yy++) { for ($xx = 0; $xx -lt 260; $xx++) {
+    if (Is-Bluish $bmp.GetPixel($xx, $yy)) { if ($xx -lt $min) { $min = $xx }; if ($xx -gt $max) { $max = $xx } } } }
+  $bmp.Dispose()
+  if ($max -lt 0) { return -1 }
+  return [Math]::Round(((($min + $max) / 2 + 100) - 127) / 19.9, 1)
+}
+$vk = @{ 0 = 0x7B; 1 = 0x70; 2 = 0x71; 3 = 0x72; 4 = 0x73; 5 = 0x74; 6 = 0x75; 7 = 0x76; 8 = 0x77; 9 = 0x78; 10 = 0x79 }
+$targets = @(2, 9, 3, 7, 1, 10, 2, 6, 3, 8, 0, 5)
+$start = [int](Read-Level)
+for ($i = 0; $i -lt [Math]::Min($Count, $targets.Count); $i++) {
+  $t = $targets[$i]
+  [R]::SetCursorPos($ParkX, 540) | Out-Null
+  Start-Sleep -Milliseconds 300
+  if ([R]::GetForegroundWindow() -ne $hwnd) { "LOST_FOCUS"; break }
+  $before = Read-Level
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  [R]::keybd_event($vk[$t], 0, 0, [UIntPtr]::Zero); [R]::keybd_event($vk[$t], 0, 2, [UIntPtr]::Zero)
+  $trace = @(); $last = $before
+  while ($sw.ElapsedMilliseconds -lt 1500) {
+    $v = Read-Level
+    if ($v -ne $last) { $trace += ("{0}ms:{1}" -f $sw.ElapsedMilliseconds, $v); $last = $v }
+    Start-Sleep -Milliseconds 20
+  }
+  "{0} -> {1}: final {2} | {3}" -f $before, $t, $last, ($trace -join " ")
+}
+if ([R]::GetForegroundWindow() -eq $hwnd) {
+  [R]::keybd_event($vk[$start], 0, 0, [UIntPtr]::Zero); [R]::keybd_event($vk[$start], 0, 2, [UIntPtr]::Zero)
+}

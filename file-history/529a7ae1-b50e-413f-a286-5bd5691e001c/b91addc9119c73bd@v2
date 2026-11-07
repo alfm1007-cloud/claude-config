@@ -1,0 +1,73 @@
+"""GUI 스모크 테스트: 창 생성·로블록스 자동 선택·입력 검증·설정 저장/복원. 실제 클릭은 하지 않음."""
+import importlib.machinery
+import importlib.util
+import json
+import os
+import tkinter as tk
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = r"C:\Users\alfm1\Desktop\Claude\click-macro\click_macro.pyw"
+
+loader = importlib.machinery.SourceFileLoader("click_macro", SRC)
+spec = importlib.util.spec_from_loader("click_macro", loader)
+cm = importlib.util.module_from_spec(spec)
+loader.exec_module(cm)
+cm.CONFIG_PATH = os.path.join(HERE, "click_config_test.json")   # 실제 설정 파일은 건드리지 않음
+if os.path.exists(cm.CONFIG_PATH):
+    os.remove(cm.CONFIG_PATH)
+
+results = []
+
+
+def check(name, cond, detail=""):
+    results.append(cond)
+    print(f"[{'PASS' if cond else 'FAIL'}] {name} {detail}")
+
+
+def logs(app):
+    return [line.split("  ", 1)[1] for line in app.log_box.get(0, "end")]
+
+
+root = tk.Tk()
+app = cm.ClickApp(root)
+root.update()
+check("창 생성", True, f"크기 {root.winfo_width()}x{root.winfo_height()}")
+check("로블록스 자동 선택", app.target == {"exe": "RobloxPlayerBeta.exe", "title": "Roblox"}, f"-> {app.combo.get()!r}")
+check("초기 위치 표시 = 미지정", app.pos_label.cget("text") == "미지정")
+
+app.toggle_run()
+check("위치 미지정 상태에서 시작 거부", not app.running and logs(app)[-1].startswith("대상 프로그램과 클릭 위치"), logs(app)[-1])
+
+for m, s, expect in (("15", "0", 900.0), ("0", "30", 30.0), ("1.5", "", 90.0), ("0", "0.5", None), ("abc", "0", None), ("", "", None)):
+    app.min_var.set(m)
+    app.sec_var.set(s)
+    check(f"간격 해석 분={m!r} 초={s!r}", app._interval_sec() == expect, f"-> {app._interval_sec()}")
+
+before = app.log_box.size()
+app.log("같은 메시지")
+app.log("같은 메시지")
+check("같은 로그 반복 시 한 줄 유지", app.log_box.size() == before + 1)
+
+# 위치 지정 후 시작/정지 (첫 클릭 예정 시각 1초 전에 정지 → 실제 클릭 없음)
+app.min_var.set("15")
+app.sec_var.set("0")
+app.pos = (0.5, 0.5)
+app._show_pos()
+app.toggle_run()
+root.update()
+check("시작됨", app.running and app.interval == 900.0, app.pos_label.cget("text"))
+app.toggle_run()
+check("정지됨", not app.running and app.status.cget("text") == "정지됨")
+
+with open(cm.CONFIG_PATH, encoding="utf-8") as f:
+    saved = json.load(f)
+check("설정 저장", saved["pos"] == [0.5, 0.5] and saved["min"] == "15", str(saved))
+root.destroy()
+
+root2 = tk.Tk()
+app2 = cm.ClickApp(root2)
+root2.update()
+check("재실행 시 설정 복원", app2.pos == (0.5, 0.5) and app2.target["exe"] == "RobloxPlayerBeta.exe" and app2.min_var.get() == "15")
+root2.destroy()
+
+print(f"\n결과: {sum(results)}/{len(results)} PASS")

@@ -1,0 +1,56 @@
+param([string]$TestDir, [string]$OutFile)
+# Calibration test: DjSpeed (target=powershell, ini without window size) should auto-start setup,
+# record 6 points from this window, save them, then click with the new positions and refuse on size change.
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public static class W {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint f, UIntPtr e);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref P p);
+  public struct P { public int X, Y; }
+}
+"@
+[W]::SetProcessDPIAware() | Out-Null
+$log = New-Object System.Collections.Generic.List[string]
+$f = New-Object System.Windows.Forms.Form
+$f.Text = "DjSpeed calibration test"; $f.FormBorderStyle = 'FixedSingle'
+$f.StartPosition = 'Manual'; $f.Location = New-Object System.Drawing.Point 0, 0
+$f.ClientSize = New-Object System.Drawing.Size 800, 650
+$f.Add_KeyDown({ param($s, $e) $log.Add("key:" + $e.KeyCode); $e.SuppressKeyPress = $true })
+$f.Add_MouseDown({ param($s, $e) $log.Add("click:$($e.X),$($e.Y)") })
+function Wait($ms) { $sw = [Diagnostics.Stopwatch]::StartNew(); while ($sw.ElapsedMilliseconds -lt $ms) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 10 } }
+function Screen($cx, $cy) { $p = New-Object W+P; $p.X = $cx; $p.Y = $cy; [W]::ClientToScreen($f.Handle, [ref]$p) | Out-Null; return $p }
+function Space { [W]::keybd_event(0x20, 0, 0, [UIntPtr]::Zero); [W]::keybd_event(0x20, 0, 2, [UIntPtr]::Zero); Wait 250 }
+$t = New-Object System.Windows.Forms.Timer; $t.Interval = 300
+$t.Add_Tick({
+  $t.Stop()
+  [W]::SetForegroundWindow($f.Handle) | Out-Null
+  if ([W]::GetForegroundWindow() -ne $f.Handle) { $log.Add("NOT_FOREGROUND"); $f.Close(); return }
+  try {
+    $dj = Start-Process -FilePath (Join-Path $script:TestDir "DjSpeed.exe") -WorkingDirectory $script:TestDir -PassThru -ErrorAction Stop
+    $log.Add("started DjSpeed pid " + $dj.Id + " from " + $script:TestDir)
+  } catch { $log.Add("START FAILED: " + $_.Exception.Message + " | TestDir='" + $script:TestDir + "'") }
+  Wait 1500
+  $log.Add("foreground still test window after guide shown: " + ([W]::GetForegroundWindow() -eq $f.Handle))
+  # Space while the cursor is not over the target window must not count
+  [W]::SetCursorPos(1800, 1100) | Out-Null; Wait 200; $log.Add("send:space outside"); Space
+  $pts = @(@(150, 560), @(350, 562), @(100, 561), @(380, 559), @(30, 440), @(700, 505))
+  foreach ($pt in $pts) { $s = Screen $pt[0] $pt[1]; [W]::SetCursorPos($s.X, $s.Y) | Out-Null; Wait 200; $log.Add("send:space at $($pt[0]),$($pt[1])"); Space }
+  Wait 500
+  [W]::SetForegroundWindow($f.Handle) | Out-Null
+  [W]::SetCursorPos(600, 300) | Out-Null; Wait 100
+  $log.Add("send:F5"); [System.Windows.Forms.SendKeys]::SendWait("{F5}"); Wait 400
+  $log.Add("send:e");  [System.Windows.Forms.SendKeys]::SendWait("e"); Wait 400
+  $f.ClientSize = New-Object System.Drawing.Size 700, 650; Wait 300
+  $log.Add("resized to 700x650; send:F5"); [System.Windows.Forms.SendKeys]::SendWait("{F5}"); Wait 400
+  $f.ClientSize = New-Object System.Drawing.Size 800, 650; Wait 300
+  $log.Add("resized back to 800x650; send:F5"); [System.Windows.Forms.SendKeys]::SendWait("{F5}"); Wait 400
+  $f.Close()
+})
+$f.Add_Shown({ $f.Activate(); $t.Start() })
+[System.Windows.Forms.Application]::Run($f)
+$log | Set-Content $OutFile

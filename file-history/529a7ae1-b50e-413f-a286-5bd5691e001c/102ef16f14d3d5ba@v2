@@ -1,0 +1,114 @@
+﻿"""최소화된 창을 '꺼내서 클릭하고 다시 내리는' 시간 비교: 파이썬 버전 vs exe (기록용 테스트 창 대상, 각 3회)."""
+import ctypes
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from ctypes import wintypes
+
+from rbx_lib import HERE, cm, u
+
+SRC_EXE = os.environ.get("TEST_EXE", r"C:\Users\alfm1\Desktop\Claude\click-macro\클릭매크로.exe")
+TEST_DIR = os.path.join(HERE, "exe_speed")
+EXE = os.path.join(TEST_DIR, "클릭매크로.exe")
+EVENTS = os.path.join(HERE, "speed_events.txt")
+
+u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, ctypes.c_void_p]
+u.SendMessageW.restype = ctypes.c_ssize_t
+u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+CB = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+u.EnumChildWindows.argtypes = [wintypes.HWND, CB, wintypes.LPARAM]
+
+
+def children(h):
+    out = []
+
+    def cb(c, _):
+        cls = ctypes.create_unicode_buffer(128)
+        txt = ctypes.create_unicode_buffer(256)
+        u.GetClassNameW(c, cls, 128)
+        u.SendMessageW(c, 0x000D, 256, ctypes.addressof(txt))
+        out.append((c, cls.value.split(".")[1] if "." in cls.value else cls.value, txt.value))
+        return True
+
+    u.EnumChildWindows(h, CB(cb), 0)
+    return out
+
+
+def mdowns():
+    if not os.path.exists(EVENTS):
+        return 0
+    with open(EVENTS, encoding="utf-8") as f:
+        return sum(1 for line in f if line.startswith("mdown"))
+
+
+def watch_visible(hwnd, stop, spans):
+    """창이 최소화에서 풀려 있던 구간 길이를 기록."""
+    shown = None
+    while not stop.is_set():
+        iconic = bool(u.IsIconic(hwnd))
+        now = time.perf_counter()
+        if not iconic and shown is None:
+            shown = now
+        elif iconic and shown is not None:
+            spans.append(now - shown)
+            shown = None
+        time.sleep(0.002)
+
+
+def measure(run_once):
+    stop = threading.Event()
+    spans = []
+    th = threading.Thread(target=watch_visible, args=(hwnd, stop, spans), daemon=True)
+    u.ShowWindow(hwnd, cm.SW_MINIMIZE)
+    time.sleep(0.6)
+    before = mdowns()
+    th.start()
+    run_once()
+    time.sleep(0.3)
+    stop.set()
+    th.join()
+    return (spans[0] if spans else None), mdowns() - before
+
+
+if os.path.exists(EVENTS):
+    os.remove(EVENTS)
+orig_fg = u.GetForegroundWindow()
+target = subprocess.Popen([sys.executable, os.path.join(HERE, "hold_target.py"), EVENTS])
+time.sleep(1.5)
+hwnd = cm.match_window(cm.list_windows(), os.path.basename(sys.executable), "ClickMacroTestTarget")[0]
+os.makedirs(TEST_DIR, exist_ok=True)
+shutil.copy2(SRC_EXE, EXE)
+with open(os.path.join(TEST_DIR, "click_config.json"), "w", encoding="utf-8") as f:
+    json.dump({"target": {"exe": os.path.basename(sys.executable), "title": "ClickMacroTestTarget"},
+               "pos": [0.25, 0.75], "min": "0", "sec": "30", "action": "mouse", "hold": "0"}, f)
+try:
+    py = [measure(lambda: cm.click_in_window(hwnd, 0.25, 0.75)) for _ in range(3)]
+
+    def exe_once():
+        p = subprocess.Popen([EXE], cwd=TEST_DIR)
+        t0 = time.monotonic()
+        win = None
+        while not win and time.monotonic() - t0 < 10:
+            time.sleep(0.05)
+            # 이름이 같은 다른 실행본(사용자가 켠 것)을 집지 않도록 방금 띄운 프로세스 번호로 찾는다
+            win = next((w for w in cm.list_windows() if cm._pid_of(w[0]) == p.pid), None)
+        time.sleep(0.4)
+        start = next(c for c, k, t in children(win[0]) if k == "BUTTON" and t.startswith("시작"))
+        u.PostMessageW(start, 0x00F5, 0, 0)
+        time.sleep(2.5)
+        p.kill()
+
+    ex = [measure(exe_once) for _ in range(3)]
+    for name, rs in (("파이썬 버전", py), ("exe", ex)):
+        spans = [s for s, _ in rs if s]
+        print(f"{name}: 창이 떠 있던 시간 {[f'{s:.3f}' for s in spans]} 평균 {sum(spans) / len(spans):.3f}s | 클릭 수신 {[n for _, n in rs]}")
+finally:
+    target.kill()
+    time.sleep(0.2)
+    if orig_fg:
+        cm._activate(orig_fg)

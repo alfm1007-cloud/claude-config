@@ -1,0 +1,53 @@
+"""절대좌표 SendInput 변환식 오차 실측 (클릭 없음, 커서만 순간 이동 후 원위치)."""
+import ctypes
+import random
+from ctypes import wintypes
+
+from rbx_lib import cm, u
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("mi", MOUSEINPUT)]
+
+
+u.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+u.GetSystemMetrics.argtypes = [ctypes.c_int]
+L, T, W, H = (u.GetSystemMetrics(i) for i in (76, 77, 78, 79))
+print(f"전체 화면(가상 데스크톱): 원점 ({L},{T}) 크기 {W}x{H} | INPUT 크기 {ctypes.sizeof(INPUT)}")
+
+FORMULAS = {
+    "A 올림 (x*65536/w)": lambda v, o, n: ((v - o) * 65536 + n - 1) // n,
+    "B 반올림 (x*65535/(w-1))": lambda v, o, n: ((v - o) * 65535 + (n - 1) // 2) // (n - 1),
+    "C 올림 (x*65535/(w-1))": lambda v, o, n: ((v - o) * 65535 + n - 2) // (n - 1),
+}
+
+
+def move(nx, ny):
+    inp = INPUT(0, MOUSEINPUT(nx, ny, 0, 0x0001 | 0x8000 | 0x4000, 0, 0))
+    u.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    p = wintypes.POINT()
+    u.GetCursorPos(ctypes.byref(p))
+    return p.x, p.y
+
+
+prev = wintypes.POINT()
+u.GetCursorPos(ctypes.byref(prev))
+random.seed(1)
+pts = [(L + random.randrange(W), T + random.randrange(H)) for _ in range(300)] + [(313, 471), (1394, 617)]
+try:
+    for name, f in FORMULAS.items():
+        errs = []
+        for x, y in pts:
+            gx, gy = move(f(x, L, W), f(y, T, H))
+            errs.append((gx - x, gy - y))
+        ex = sorted(set(e[0] for e in errs))
+        ey = sorted(set(e[1] for e in errs))
+        exact = sum(1 for e in errs if e == (0, 0))
+        print(f"{name}: 정확 {exact}/{len(errs)} | x오차 종류 {ex} | y오차 종류 {ey}")
+finally:
+    u.SetCursorPos(prev.x, prev.y)

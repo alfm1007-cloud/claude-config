@@ -1,0 +1,36 @@
+"""실험 C: 수정된 click_in_window 로 로블록스의 지정 지점을 클릭. 인자: 태그 x y [min]"""
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+
+from rbx_lib import capture, cm, roblox_hwnd, u
+
+tag, x, y = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+minimize_first = len(sys.argv) > 4
+CROP = (0, 0, 420, 310)
+
+h = roblox_hwnd()
+if minimize_first:
+    u.ShowWindow(h, cm.SW_MINIMIZE)
+    time.sleep(0.8)
+rect = wintypes.RECT()
+u.GetClientRect(h, ctypes.byref(rect))
+fg_before = u.GetForegroundWindow()
+was_min = bool(u.IsIconic(h))
+if not was_min:
+    pt = wintypes.POINT(x, y)
+    u.ClientToScreen(h, ctypes.byref(pt))
+    covered = u.GetAncestor(u.WindowFromPoint(pt), cm.GA_ROOT) != h
+    print(f"로블록스가 맨 앞: {fg_before == h} | 클릭 지점이 다른 창에 가려짐: {covered}")
+else:
+    print("로블록스 최소화 상태")
+
+t0 = time.monotonic()
+ok, msg = cm.click_in_window(h, x / 800, y / 599)
+print(f"반환: {ok} ({msg}) | 소요 {time.monotonic() - t0:.2f}s | 맨 앞 창 복귀: {u.GetForegroundWindow() == fg_before} | 다시 최소화: {bool(u.IsIconic(h)) == was_min}")
+time.sleep(1.0)
+if u.IsIconic(h):
+    print("(최소화 상태라 화면 캡처 생략)")
+else:
+    capture(h, f"fg_{tag}.png")[0].crop(CROP).save(f"fg_{tag}_crop.png")

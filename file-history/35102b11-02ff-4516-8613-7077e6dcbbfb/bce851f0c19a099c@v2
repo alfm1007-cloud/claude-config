@@ -1,0 +1,43 @@
+param([int]$Count = 20, [string]$Label = "", [int]$Seed = 7, [int]$ParkX = 200, [int]$ParkY = 540)
+# Like rbx_trials.ps1 but waits until the knob stops moving, and counts a trial as failed only if it never moved.
+. "$PSScriptRoot\rbx_common.ps1"
+if (-not (Focus-Roblox)) { "NOT_FOREGROUND"; exit 1 }
+$hwnd = Get-RobloxHwnd
+function Read-Pos {
+  $bmp = Grab 100 561 260 4
+  $min = 9999; $max = -1
+  for ($yy = 0; $yy -lt 4; $yy++) { for ($xx = 0; $xx -lt 260; $xx++) {
+    if (Is-Bluish $bmp.GetPixel($xx, $yy)) { if ($xx -lt $min) { $min = $xx }; if ($xx -gt $max) { $max = $xx } } } }
+  $bmp.Dispose()
+  if ($max -lt 0) { return -99 }
+  return ((($min + $max) / 2 + 100) - 127) / 19.9
+}
+function Read-Stable {
+  $sw = [Diagnostics.Stopwatch]::StartNew(); $last = Read-Pos; $since = 0
+  while ($sw.ElapsedMilliseconds -lt 2000) {
+    Start-Sleep -Milliseconds 40
+    $v = Read-Pos
+    if ([Math]::Abs($v - $last) -lt 0.05) { $since += 40; if ($since -ge 240 -and $sw.ElapsedMilliseconds -ge 700) { break } } else { $since = 0 }
+    $last = $v
+  }
+  return [int][Math]::Round($last)
+}
+$vk = @{ 0 = 0x7B; 1 = 0x70; 2 = 0x71; 3 = 0x72; 4 = 0x73; 5 = 0x74; 6 = 0x75; 7 = 0x76; 8 = 0x77; 9 = 0x78; 10 = 0x79 }
+$pool = @(2, 3, 2, 3, 1, 4, 5, 6, 7, 8, 9, 10, 0)
+$rng = New-Object System.Random $Seed
+$start = Read-Stable; $cur = $start
+$ok = 0; $stuck = 0; $wrong = @(); $seq = ""
+for ($i = 0; $i -lt $Count; $i++) {
+  do { $t = $pool[$rng.Next($pool.Count)] } while ($t -eq $cur)
+  [R]::SetCursorPos($ParkX, $ParkY) | Out-Null
+  Start-Sleep -Milliseconds 200
+  if ([R]::GetForegroundWindow() -ne $hwnd) { "LOST_FOCUS at trial $i"; break }
+  [R]::keybd_event($vk[$t], 0, 0, [UIntPtr]::Zero); [R]::keybd_event($vk[$t], 0, 2, [UIntPtr]::Zero)
+  $got = Read-Stable
+  if ($got -eq $t) { $ok++; $seq += "o" } elseif ($got -eq $cur) { $stuck++; $seq += "x" } else { $wrong += "$cur->$t got $got"; $seq += "?" }
+  $cur = $got
+}
+"$Label  ok=$ok/$Count  no-move=$stuck  wrong=" + ($wrong -join "; ") + "  seq=$seq"
+if ($start -ge 0 -and [R]::GetForegroundWindow() -eq $hwnd) {
+  [R]::keybd_event($vk[$start], 0, 0, [UIntPtr]::Zero); [R]::keybd_event($vk[$start], 0, 2, [UIntPtr]::Zero)
+}

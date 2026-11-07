@@ -1,0 +1,158 @@
+$ErrorActionPreference = 'Stop'
+$dir = 'C:\Users\alfm1\Desktop\Claude\halligalli-bell'
+$ini = Join-Path $dir 'HalliBell.ini'
+
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows.Forms;
+
+public static class Harness
+{
+    [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)] struct U { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public U u; }
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] i, int size);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint type);
+    [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int v);
+
+    static Stopwatch sw = Stopwatch.StartNew();
+    static void Wait(int ms) { long end = sw.ElapsedMilliseconds + ms; while (sw.ElapsedMilliseconds < end) Application.DoEvents(); }
+    static void Key(Keys k, bool up)
+    {
+        var i = new INPUT { type = 1 };
+        i.u.ki.wVk = (ushort)k; i.u.ki.wScan = (ushort)MapVirtualKey((uint)k, 0); i.u.ki.dwFlags = up ? 2u : 0u;
+        SendInput(1, new[] { i }, Marshal.SizeOf(typeof(INPUT)));
+    }
+    static void Tap(Keys k) { Key(k, false); Wait(30); Key(k, true); }
+    static void ClickAt(Point p)
+    {
+        long l = GetSystemMetrics(76), t = GetSystemMetrics(77), w = GetSystemMetrics(78), h = GetSystemMetrics(79);
+        var a = new INPUT[2];
+        for (int n = 0; n < 2; n++)
+        {
+            a[n].type = 0;
+            a[n].u.mi.dx = (int)(((p.X - l) * 65536 + w - 1) / w);
+            a[n].u.mi.dy = (int)(((p.Y - t) * 65536 + h - 1) / h);
+            a[n].u.mi.dwFlags = 0x0001u | 0x8000u | 0x4000u | (n == 0 ? 0x0002u : 0x0004u);
+        }
+        SendInput(2, a, Marshal.SizeOf(typeof(INPUT)));
+    }
+    static Point Cur() { POINT p; GetCursorPos(out p); return new Point(p.X, p.Y); }
+    static string Stat(List<double> v)
+    {
+        if (v.Count == 0) return "(측정 0건)";
+        double min = double.MaxValue, max = 0, sum = 0;
+        foreach (double d in v) { min = Math.Min(min, d); max = Math.Max(max, d); sum += d; }
+        return string.Format("{0:0.00}~{1:0.00}ms (평균 {2:0.00}, {3}건)", min, max, sum / v.Count, v.Count);
+    }
+
+    public static string Run(string iniPath)
+    {
+        try { SetProcessDpiAwareness(2); } catch (Exception) { }
+        var log = new StringBuilder();
+        Point userCursor = Cur();
+
+        var f = new Form { Text = "HalliBell 자동 테스트 (몇 초 뒤 닫힘)", TopMost = true, KeyPreview = true,
+                           StartPosition = FormStartPosition.Manual, Location = new Point(200, 200), ClientSize = new Size(520, 260) };
+        var btn = new Button { Text = "BELL", Location = new Point(20, 20), Size = new Size(140, 90), TabStop = false };
+        f.Controls.Add(btn);
+        var downTimes = new List<double>();
+        int spaceToApp = 0;
+        btn.MouseDown += delegate { downTimes.Add(sw.Elapsed.TotalMilliseconds); };
+        f.KeyDown += delegate (object s, KeyEventArgs e) { if (e.KeyCode == Keys.Space) spaceToApp++; };
+        f.Show();
+        Wait(300);
+        ClickAt(f.PointToScreen(new Point(450, 230))); // 빈 곳 클릭 → 앞 창으로
+        Wait(200);
+        log.AppendLine("테스트 창이 앞 창: " + (GetForegroundWindow() == f.Handle));
+
+        Point bell = btn.PointToScreen(new Point(70, 45));
+        Point rest = f.PointToScreen(new Point(420, 60));
+
+        // 0) 기준선: 프로그램 없이 버튼을 직접 클릭했을 때 (윈도우 입력 처리 자체 지연)
+        var baseline = new List<double>();
+        for (int n = 0; n < 10; n++)
+        {
+            SetCursorPos(rest.X, rest.Y); Wait(30);
+            int before = downTimes.Count; double t0 = sw.Elapsed.TotalMilliseconds;
+            ClickAt(bell); Wait(80);
+            if (downTimes.Count > before) baseline.Add(downTimes[before] - t0);
+        }
+        log.AppendLine("[기준선] 직접 클릭 → 버튼 눌림: " + Stat(baseline));
+
+        // 1) F7 등록
+        SetCursorPos(bell.X, bell.Y); Wait(50);
+        Tap(Keys.F7); Wait(500);
+        var saved = new List<string>();
+        foreach (string l in File.ReadAllLines(iniPath, Encoding.UTF8))
+            if (l.StartsWith("TargetProcess=") || l.StartsWith("BellX=") || l.StartsWith("BellY=")) saved.Add(l);
+        log.AppendLine("[F7] ini 저장: " + string.Join(" ", saved.ToArray()));
+
+        // 2) Space 10회: 클릭 성공·지연·커서 복귀·Space 차단
+        var lat = new List<double>();
+        int returned = 0, s0 = spaceToApp;
+        for (int n = 0; n < 10; n++)
+        {
+            SetCursorPos(rest.X, rest.Y); Wait(40);
+            int before = downTimes.Count; double t0 = sw.Elapsed.TotalMilliseconds;
+            Key(Keys.Space, false); Wait(40); Key(Keys.Space, true); Wait(120);
+            if (downTimes.Count > before) lat.Add(downTimes[before] - t0);
+            Point c = Cur();
+            if (Math.Abs(c.X - rest.X) <= 1 && Math.Abs(c.Y - rest.Y) <= 1) returned++;
+            else log.AppendLine("  복귀 실패 #" + n + ": 커서=" + c + " 기대=" + rest + " 종=" + bell);
+        }
+        log.AppendLine("[Space x10] 종 클릭 " + lat.Count + "/10, 커서 원위치 복귀 " + returned + "/10, 앱에 새어나간 Space " + (spaceToApp - s0) + "개(기대 0)");
+        log.AppendLine("[Space x10] 키 누름 → 버튼 눌림: " + Stat(lat));
+
+        // 3) 꾹 누름 (반복 입력 3번 + 뗌) → 1번만
+        SetCursorPos(rest.X, rest.Y); Wait(40);
+        int b3 = downTimes.Count;
+        Key(Keys.Space, false); Wait(40); Key(Keys.Space, false); Wait(40); Key(Keys.Space, false); Wait(40); Key(Keys.Space, true); Wait(150);
+        log.AppendLine("[꾹 누름] 클릭 " + (downTimes.Count - b3) + "회(기대 1)");
+
+        // 4) F8 끄기 → 클릭 없음, Space는 앱에 그대로
+        Tap(Keys.F8); Wait(250);
+        int b4 = downTimes.Count, s4 = spaceToApp;
+        SetCursorPos(rest.X, rest.Y); Wait(30);
+        Tap(Keys.Space); Wait(200);
+        log.AppendLine("[F8 끔] 클릭 " + (downTimes.Count - b4) + "회(기대 0), 앱에 간 Space " + (spaceToApp - s4) + "개(기대 1)");
+
+        // 5) F8 다시 켜기 → 클릭 1회
+        Tap(Keys.F8); Wait(250);
+        int b5 = downTimes.Count;
+        SetCursorPos(rest.X, rest.Y); Wait(30);
+        Tap(Keys.Space); Wait(200);
+        log.AppendLine("[F8 켬] 클릭 " + (downTimes.Count - b5) + "회(기대 1)");
+
+        f.Close();
+        SetCursorPos(userCursor.X, userCursor.Y);
+        return log.ToString();
+    }
+}
+'@
+
+$log = Join-Path $dir 'HalliBell.log'
+Remove-Item $log -ErrorAction SilentlyContinue
+Add-Content $ini "Debug=1" -Encoding UTF8
+"화면 배율: " + [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.ToString()
+$p = Start-Process (Join-Path $dir 'HalliBell.exe') -PassThru
+Start-Sleep -Milliseconds 1500
+try {
+    [Harness]::Run($ini)
+} finally {
+    Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
+}
+"===== HalliBell.log ====="
+Get-Content $log -Encoding UTF8

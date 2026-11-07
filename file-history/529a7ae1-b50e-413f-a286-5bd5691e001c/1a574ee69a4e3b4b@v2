@@ -1,0 +1,92 @@
+"""로블록스 대상 진단 (클릭은 하지 않음): 앞으로 가져오기 → 클릭 지점이 실제로 로블록스 것이 되는 시점 측정."""
+import ctypes
+import importlib.machinery
+import importlib.util
+import json
+import time
+from ctypes import wintypes
+
+SRC = r"C:\Users\alfm1\Desktop\Claude\click-macro\click_macro.pyw"
+CFG = r"C:\Users\alfm1\Desktop\Claude\click-macro\click_config.json"
+
+loader = importlib.machinery.SourceFileLoader("click_macro", SRC)
+spec = importlib.util.spec_from_loader("click_macro", loader)
+cm = importlib.util.module_from_spec(spec)
+loader.exec_module(cm)
+u = cm.user32
+u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+
+
+def info(h):
+    if not h:
+        return "(없음)"
+    t = ctypes.create_unicode_buffer(200)
+    c = ctypes.create_unicode_buffer(200)
+    u.GetWindowTextW(h, t, 200)
+    u.GetClassNameW(h, c, 200)
+    topmost = bool(u.GetWindowLongW(h, -20) & 0x8)
+    return f"[{cm._exe_name(cm._pid_of(h))} | class={c.value} | title={t.value[:30]!r} | 항상위={topmost}]"
+
+
+def root_at(pt):
+    return u.GetAncestor(u.WindowFromPoint(pt), cm.GA_ROOT)
+
+
+with open(CFG, encoding="utf-8") as f:
+    cfg = json.load(f)
+print("설정:", cfg)
+
+wins = cm.list_windows()
+same = [w for w in wins if w[2].lower() == cfg["target"]["exe"].lower()]
+print(f"대상 exe 창 수: {len(same)} -> {[(w[1]) for w in same]}")
+w = cm.match_window(wins, cfg["target"]["exe"], cfg["target"]["title"])
+if not w or not cfg.get("pos"):
+    raise SystemExit("대상 창 또는 클릭 위치 없음")
+hwnd = w[0]
+rx, ry = cfg["pos"]
+
+prev_fg = u.GetForegroundWindow()
+was_min = bool(u.IsIconic(hwnd))
+wr = wintypes.RECT()
+u.GetWindowRect(hwnd, ctypes.byref(wr))
+print("대상:", info(hwnd), f"최소화={was_min} 창영역=({wr.left},{wr.top})-({wr.right},{wr.bottom})")
+print("현재 맨 앞:", info(prev_fg))
+
+t0 = time.monotonic()
+if was_min:
+    u.ShowWindow(hwnd, cm.SW_RESTORE)
+    time.sleep(cm.RESTORE_SEC)
+u.keybd_event(cm.VK_MENU, 0, 0, 0)
+ret = u.SetForegroundWindow(hwnd)
+u.keybd_event(cm.VK_MENU, 0, cm.KEYEVENTF_KEYUP, 0)
+print(f"SetForegroundWindow 반환={ret}")
+
+fg_at = top_at = None
+last_state = None
+while time.monotonic() - t0 < 2.5:
+    rect = wintypes.RECT()
+    u.GetClientRect(hwnd, ctypes.byref(rect))
+    pt = wintypes.POINT(int(rect.right * rx), int(rect.bottom * ry))
+    u.ClientToScreen(hwnd, ctypes.byref(pt))
+    fg = u.GetForegroundWindow()
+    root = root_at(pt)
+    now = time.monotonic() - t0
+    state = (fg, root, rect.right, rect.bottom)
+    if state != last_state:
+        print(f"  t={now:.3f}s  맨앞==대상:{fg == hwnd}  지점의 창==대상:{root == hwnd}  "
+              f"안쪽크기={rect.right}x{rect.bottom} 지점=({pt.x},{pt.y})  지점의 창={info(root) if root != hwnd else '대상'}")
+        last_state = state
+    if fg_at is None and fg == hwnd:
+        fg_at = now
+    if top_at is None and root == hwnd:
+        top_at = now
+    time.sleep(0.005)
+
+print(f"맨 앞이 된 시점: {fg_at}  /  클릭 지점이 대상 창이 된 시점: {top_at}")
+
+if was_min:
+    u.ShowWindow(hwnd, cm.SW_MINIMIZE)
+if prev_fg and prev_fg != hwnd:
+    print("원래 창 복귀:", cm._activate(prev_fg))

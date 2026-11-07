@@ -1,0 +1,82 @@
+"""진단: 최소화 아닌 로블록스에 클릭하는 동안 단계별 화면 캡처 (올림 → 누름 → 뗀 직후 → 0.5초 뒤).
+인자: alt | noalt  (앞으로 가져올 때 Alt 입력을 쓰는지 여부)"""
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+
+from PIL import Image
+
+from rbx_lib import capture, cm, roblox_hwnd, u
+from timing_exp_lib import DOWN, UP, pin, send
+
+mode = sys.argv[1]
+X, Y = 139, 35
+BOX = (0, 0, 330, 120)
+h = roblox_hwnd()
+u.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+u.BringWindowToTop.argtypes = [wintypes.HWND]
+k32 = ctypes.WinDLL("kernel32")
+
+
+def activate_noalt(hwnd):
+    """Alt 입력 없이 앞으로: 현재 맨 앞 창의 입력 스레드에 잠깐 붙어서 전환 권한을 얻는다."""
+    fg = u.GetForegroundWindow()
+    if fg == hwnd:
+        return True
+    fg_tid = u.GetWindowThreadProcessId(fg, None)
+    my_tid = k32.GetCurrentThreadId()
+    u.AttachThreadInput(my_tid, fg_tid, True)
+    u.BringWindowToTop(hwnd)
+    u.SetForegroundWindow(hwnd)
+    u.AttachThreadInput(my_tid, fg_tid, False)
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        if u.GetForegroundWindow() == hwnd:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+shots = []
+
+
+def shot(label):
+    shots.append((label, capture(h, "diag_tmp.png")[0].crop(BOX)))
+
+
+prev_fg = u.GetForegroundWindow()
+prev = wintypes.POINT()
+u.GetCursorPos(ctypes.byref(prev))
+print("최소화:", bool(u.IsIconic(h)), "| 로블록스가 맨 앞:", prev_fg == h)
+shot("before")
+try:
+    ok = cm._activate(h) if mode == "alt" else activate_noalt(h)
+    print("앞으로 가져오기:", ok)
+    pt = wintypes.POINT(X, Y)
+    u.ClientToScreen(h, ctypes.byref(pt))
+    deadline = time.monotonic() + 0.5
+    while u.GetAncestor(u.WindowFromPoint(pt), cm.GA_ROOT) != h and time.monotonic() < deadline:
+        time.sleep(0.01)
+    pin(pt.x, pt.y, 0.3, True)
+    shot("hover")
+    send(pt.x, pt.y, DOWN)
+    pin(pt.x, pt.y, 0.15, False)
+    shot("down")
+    send(pt.x, pt.y, UP)
+    pin(pt.x, pt.y, 0.1, False)
+    shot("up+0.1")
+    pin(pt.x, pt.y, 0.4, False)
+    shot("up+0.5")
+finally:
+    u.SetCursorPos(prev.x, prev.y)
+    if prev_fg and prev_fg != h:
+        cm._activate(prev_fg) if mode == "alt" else activate_noalt(prev_fg)
+time.sleep(0.8)
+shot("after")
+
+sheet = Image.new("RGB", (BOX[2], BOX[3] * len(shots)))
+for i, (label, img) in enumerate(shots):
+    sheet.paste(img, (0, BOX[3] * i))
+sheet.save(f"diag_{mode}.png")
+print("단계:", [s[0] for s in shots])

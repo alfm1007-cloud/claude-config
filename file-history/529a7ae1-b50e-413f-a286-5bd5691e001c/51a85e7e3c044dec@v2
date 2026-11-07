@@ -1,0 +1,104 @@
+"""exe 클릭 정확도 검증: 클릭 좌표를 기록하는 테스트 창을 대상으로, 마우스를 계속 흔드는 중에 exe가 누른 위치 확인."""
+import ctypes
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from ctypes import wintypes
+
+from rbx_lib import HERE, cm, u
+
+SRC_EXE = r"C:\Users\alfm1\Desktop\Claude\click-macro\클릭매크로.exe"
+TEST_DIR = os.path.join(HERE, "exe_test")
+EXE = os.path.join(TEST_DIR, "클릭매크로.exe")
+OUT = os.path.join(HERE, "clicks_exe.txt")
+RX, RY = 0.25, 0.75
+
+u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, ctypes.c_void_p]
+u.SendMessageW.restype = ctypes.c_ssize_t
+u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+CB = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+u.EnumChildWindows.argtypes = [wintypes.HWND, CB, wintypes.LPARAM]
+
+
+def text_of(h):
+    buf = ctypes.create_unicode_buffer(512)
+    u.SendMessageW(h, 0x000D, 512, ctypes.addressof(buf))
+    return buf.value
+
+
+def children(h):
+    out = []
+
+    def cb(c, _):
+        cls = ctypes.create_unicode_buffer(128)
+        u.GetClassNameW(c, cls, 128)
+        out.append((c, cls.value.split(".")[1] if "." in cls.value else cls.value, text_of(c)))
+        return True
+
+    u.EnumChildWindows(h, CB(cb), 0)
+    return out
+
+
+def log_lines(hlist):
+    lines = []
+    for i in range(u.SendMessageW(hlist, 0x018B, 0, None)):
+        buf = ctypes.create_unicode_buffer(512)
+        u.SendMessageW(hlist, 0x0189, i, ctypes.addressof(buf))
+        lines.append(buf.value)
+    return lines
+
+
+if os.path.exists(OUT):
+    os.remove(OUT)
+os.makedirs(TEST_DIR, exist_ok=True)
+shutil.copy2(SRC_EXE, EXE)
+with open(os.path.join(TEST_DIR, "click_config.json"), "w", encoding="utf-8") as f:
+    json.dump({"target": {"exe": os.path.basename(sys.executable), "title": "ClickMacroTestTarget"},
+               "pos": [RX, RY], "min": "0", "sec": "30"}, f)
+
+orig_fg = u.GetForegroundWindow()
+target = subprocess.Popen([sys.executable, os.path.join(HERE, "test_target.py"), OUT])
+time.sleep(1.5)
+proc = subprocess.Popen([EXE], cwd=TEST_DIR)
+stop = threading.Event()
+try:
+    win = None
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 10 and not win:
+        time.sleep(0.05)
+        win = next((w for w in cm.list_windows() if w[2] == "클릭매크로.exe"), None)
+    time.sleep(0.3)
+    kids = children(win[0])
+    print("대상 표시:", next(t for _, k, t in kids if k == "COMBOBOX"))
+    start = next(c for c, k, t in kids if k == "BUTTON" and t.startswith("시작"))
+    hlist = next(c for c, k, _ in kids if k == "LISTBOX")
+
+    def shaker():
+        i = 0
+        while not stop.is_set():
+            u.mouse_event(cm.MOUSEEVENTF_MOVE, 5 if (i // 40) % 2 == 0 else -5, 0, 0, 0)
+            i += 1
+            time.sleep(0.004)
+
+    threading.Thread(target=shaker, daemon=True).start()
+    u.PostMessageW(start, 0x00F5, 0, 0)
+    t1 = time.monotonic()
+    while time.monotonic() - t1 < 4 and not any(s.endswith(("클릭 완료", "건너뜀")) for s in log_lines(hlist)):
+        time.sleep(0.05)
+    time.sleep(0.4)
+    stop.set()
+    print("로그:", log_lines(hlist))
+    got = open(OUT, encoding="utf-8").read().split() if os.path.exists(OUT) else []
+    print(f"테스트 창이 받은 클릭: {got}  (기대: {RX:.4f},{RY:.4f})")
+finally:
+    stop.set()
+    proc.kill()
+    target.kill()
+    time.sleep(0.3)
+    if orig_fg:
+        cm._activate(orig_fg)

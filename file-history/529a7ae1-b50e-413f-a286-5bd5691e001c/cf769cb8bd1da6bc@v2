@@ -1,0 +1,44 @@
+"""실험 B: 창 전환 없이 메시지만 보내 채팅 아이콘(139,35)을 클릭. 인자: plain | fakefocus"""
+import sys
+import time
+from ctypes import wintypes
+
+from rbx_lib import capture, cm, roblox_hwnd, u
+
+u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+
+WM_ACTIVATE, WM_SETFOCUS, WM_KILLFOCUS, WM_ACTIVATEAPP = 0x0006, 0x0007, 0x0008, 0x001C
+WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0200, 0x0201, 0x0202
+X, Y = 139, 35
+CROP = (0, 0, 420, 310)
+
+mode = sys.argv[1]
+h = roblox_hwnd()
+fg_before = u.GetForegroundWindow()
+print("모드:", mode, "| 로블록스가 맨 앞인가:", fg_before == h)
+capture(h, f"bg_{mode}_before.png")[0].crop(CROP).save(f"bg_{mode}_before_crop.png")
+
+lp = (Y << 16) | X
+if mode == "fakefocus":
+    # 창이 활성화됐다고 믿게 만드는 메시지를 먼저 보냄 (실제 창 순서는 그대로)
+    u.PostMessageW(h, WM_ACTIVATEAPP, 1, 0)
+    u.PostMessageW(h, WM_ACTIVATE, 1, 0)
+    u.PostMessageW(h, WM_SETFOCUS, 0, 0)
+    time.sleep(0.3)
+u.PostMessageW(h, WM_MOUSEMOVE, 0, lp)
+time.sleep(0.05)
+u.PostMessageW(h, WM_MOUSEMOVE, 0, ((Y + 1) << 16) | (X + 1))
+time.sleep(0.05)
+u.PostMessageW(h, WM_MOUSEMOVE, 0, lp)
+time.sleep(0.05)
+u.PostMessageW(h, WM_LBUTTONDOWN, 1, lp)
+time.sleep(cm.HOLD_SEC)
+u.PostMessageW(h, WM_LBUTTONUP, 0, lp)
+time.sleep(1.0)
+capture(h, f"bg_{mode}_after.png")[0].crop(CROP).save(f"bg_{mode}_after_crop.png")
+if mode == "fakefocus":
+    u.PostMessageW(h, WM_KILLFOCUS, 0, 0)
+    u.PostMessageW(h, WM_ACTIVATE, 0, 0)
+    u.PostMessageW(h, WM_ACTIVATEAPP, 0, 0)
+print("맨 앞 창 변화 없음:", u.GetForegroundWindow() == fg_before)

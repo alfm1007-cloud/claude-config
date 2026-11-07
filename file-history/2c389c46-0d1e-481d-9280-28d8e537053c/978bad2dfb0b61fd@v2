@@ -1,0 +1,472 @@
+// 할리갈리 종 단축키
+// F7    = 마우스를 종 위에 올리고 누르면 그 자리를 종 위치로 저장 (그 창의 프로그램 이름도 함께 저장)
+// Space = 저장한 종 위치를 바로 클릭하고 마우스를 원래 자리로 되돌림
+//         저장한 프로그램 창이 앞에 있을 때만 동작하고, 그때 Space는 게임에 보내지 않는다 (Ctrl/Alt/Shift/Win과 함께 누르면 원래대로)
+// F8    = 켜기/끄기 (채팅 칠 때 끄기)
+// 키·클릭 타이밍은 exe와 같은 이름의 .ini에서 바꾼다.
+// 빌드: build.bat (Windows 기본 .NET Framework 컴파일러, 설치 불필요)
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+
+static class HalliBell
+{
+    const int WH_KEYBOARD_LL = 13;
+    const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104;
+    const int VK_SHIFT = 0x10, VK_CONTROL = 0x11, VK_MENU = 0x12, VK_LWIN = 0x5B, VK_RWIN = 0x5C;
+    const uint INPUT_MOUSE = 0;
+    const uint MOUSEEVENTF_MOVE = 0x0001, MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004;
+    const uint MOUSEEVENTF_VIRTUALDESK = 0x4000, MOUSEEVENTF_ABSOLUTE = 0x8000;
+    const int SM_XVIRTUALSCREEN = 76, SM_YVIRTUALSCREEN = 77, SM_CXVIRTUALSCREEN = 78, SM_CYVIRTUALSCREEN = 79;
+    const uint GA_ROOT = 2, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct KBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT { public uint type; public MOUSEINPUT mi; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINT { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct RECT { public int Left, Top, Right, Bottom; }
+
+    delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int idHook, HookProc fn, IntPtr hMod, uint threadId);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
+    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr hWnd, ref POINT p);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+    [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int value);
+    [DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint ms);
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr h, uint flags, StringBuilder name, ref int size);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+
+    // 훅이 도는 동안 GC에 수거되지 않게 붙잡아 둔다
+    static readonly HookProc keyProc = KeyCallback;
+    static IntPtr keyHook;
+    static string iniPath;
+
+    // 설정 (.ini)
+    static uint bellKey = (uint)Keys.Space, setKey = (uint)Keys.F7, toggleKey = (uint)Keys.F8;
+    static int moveDelayMs = 0, holdMs = 0, returnDelayMs = 30;
+    static bool returnCursor = true;
+    static string targetProcess = ""; // 종 위치를 저장한 창의 프로그램 이름 (예: chrome)
+    static int bellX, bellY;          // 그 창 안쪽(제목 표시줄 아래) 기준 픽셀
+    static bool hasBell;
+    static bool debug; // 1이면 HalliBell.log에 키·클릭 기록 (문제 확인용)
+    static string logPath;
+    static readonly object logLock = new object();
+
+    // 아래 상태는 모두 UI 스레드(= 훅이 불리는 스레드)에서만 바꾼다
+    static bool enabled = true;
+    static bool bellDown; // 종 키를 막은 채 누르고 있는 중 → 꾹 누름 반복·뗌도 같이 막는다
+    static readonly HashSet<uint> held = new HashSet<uint>();
+    static IntPtr lastHwnd;
+    static bool lastIsTarget;
+
+    static readonly BlockingCollection<Point[]> jobs = new BlockingCollection<Point[]>(); // {종 위치, 되돌아갈 위치}
+    static Control ui; // 훅 안에서 무거운 일(파일 저장 등)을 훅이 끝난 뒤로 미루는 용도
+    static NotifyIcon tray;
+    static ToolStripMenuItem toggleItem;
+    static Icon iconOn, iconOff, iconNoBell;
+
+    [STAThread]
+    static void Main()
+    {
+        bool created;
+        using (new Mutex(true, "HalliGalliBell", out created))
+        {
+            if (!created) { MessageBox.Show("이미 실행 중입니다. (작업 표시줄 오른쪽 트레이 아이콘)", "할리갈리 종"); return; }
+
+            try { SetProcessDpiAwareness(2); }
+            catch (Exception) { try { SetProcessDPIAware(); } catch (Exception) { } }
+            try { timeBeginPeriod(1); } catch (Exception) { } // 짧은 대기(ms)가 15ms 단위로 늘어지지 않게
+
+            iniPath = Path.ChangeExtension(Application.ExecutablePath, ".ini");
+            logPath = Path.ChangeExtension(Application.ExecutablePath, ".log");
+            if (!File.Exists(iniPath)) File.WriteAllText(iniPath, DefaultIni, new UTF8Encoding(false));
+            LoadIni();
+
+            ui = new Control();
+            IntPtr forceHandle = ui.Handle;
+
+            iconOn = MakeIcon(Color.FromArgb(34, 197, 94));
+            iconOff = MakeIcon(Color.FromArgb(150, 150, 150));
+            iconNoBell = MakeIcon(Color.FromArgb(245, 158, 11));
+            tray = new NotifyIcon { Visible = true };
+            var menu = new ContextMenuStrip();
+            toggleItem = new ToolStripMenuItem("켜짐 (" + KeyName(toggleKey) + ")", null, delegate { Toggle(); });
+            menu.Items.Add(toggleItem);
+            menu.Items.Add("설정 파일 열기", null, delegate { Process.Start("notepad.exe", "\"" + iniPath + "\""); });
+            menu.Items.Add("종료", null, delegate { Application.Exit(); });
+            tray.ContextMenuStrip = menu;
+            UpdateTray();
+
+            var worker = new Thread(Worker) { IsBackground = true, Priority = ThreadPriority.Highest };
+            worker.Start();
+
+            keyHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyProc, GetModuleHandle(null), 0);
+            if (keyHook == IntPtr.Zero)
+            {
+                tray.Visible = false;
+                MessageBox.Show("키보드 훅 설치 실패 (오류 " + Marshal.GetLastWin32Error() + ")", "할리갈리 종");
+                return;
+            }
+
+            if (!hasBell)
+                tray.ShowBalloonTip(5000, "할리갈리 종", "게임의 종 위에 마우스를 올리고 " + KeyName(setKey) + "를 누르세요", ToolTipIcon.Info);
+
+            Application.Run();
+            UnhookWindowsHookEx(keyHook);
+            tray.Visible = false;
+        }
+    }
+
+    static IntPtr KeyCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            var k = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
+            int msg = wParam.ToInt32();
+            bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            uint vk = k.vkCode;
+            if (debug && (vk == bellKey || vk == setKey || vk == toggleKey))
+                Log("key " + KeyName(vk) + (down ? " down" : " up") + " msg=0x" + msg.ToString("X") + " flags=0x" + k.flags.ToString("X") + " enabled=" + enabled + " bellDown=" + bellDown);
+
+            if (vk == bellKey)
+            {
+                if (down)
+                {
+                    if (bellDown) return (IntPtr)1; // 꾹 누를 때 들어오는 반복 입력 (이미 한 번 쳤음)
+                    Point bell;
+                    if (CanRing(out bell))
+                    {
+                        bellDown = true;
+                        POINT cur;
+                        GetCursorPos(out cur);
+                        jobs.Add(new[] { bell, new Point(cur.X, cur.Y) });
+                        return (IntPtr)1;
+                    }
+                }
+                else if (bellDown)
+                {
+                    bellDown = false;
+                    return (IntPtr)1;
+                }
+            }
+            else if (vk == setKey || vk == toggleKey)
+            {
+                if (down)
+                {
+                    if (held.Add(vk))
+                    {
+                        if (vk == setKey)
+                        {
+                            POINT p;
+                            GetCursorPos(out p);
+                            ui.BeginInvoke((Action)(() => SaveBell(p)));
+                        }
+                        else ui.BeginInvoke((Action)Toggle);
+                    }
+                }
+                else held.Remove(vk);
+                return (IntPtr)1; // 게임·브라우저에 보내지 않는다 (크롬은 F7을 받으면 '캐럿 브라우징' 창을 띄움)
+            }
+        }
+        return CallNextHookEx(keyHook, nCode, wParam, lParam);
+    }
+
+    // 지금 종을 쳐도 되면 화면 좌표로 종 위치를 돌려준다
+    static bool CanRing(out Point bell)
+    {
+        bell = Point.Empty;
+        if (!enabled || !hasBell) return false;
+        if (!IsModifier(bellKey) && (Pressed(VK_CONTROL) || Pressed(VK_MENU) || Pressed(VK_SHIFT) || Pressed(VK_LWIN) || Pressed(VK_RWIN)))
+            return false; // Ctrl+Space(한/영 전환 등) 같은 조합은 원래대로
+
+        IntPtr fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero) return false;
+        if (fg != lastHwnd)
+        {
+            lastHwnd = fg;
+            lastIsTarget = string.Equals(ProcessNameOf(fg), targetProcess, StringComparison.OrdinalIgnoreCase);
+        }
+        if (!lastIsTarget) return false;
+
+        RECT rc;
+        GetClientRect(fg, out rc);
+        if (bellX < 0 || bellY < 0 || bellX >= rc.Right || bellY >= rc.Bottom)
+        {
+            Beep(300); // 창이 작아져 종 자리가 창 밖 → 다시 F7로 저장해야 함
+            return false;
+        }
+        var p = new POINT { X = bellX, Y = bellY };
+        ClientToScreen(fg, ref p);
+        bell = new Point(p.X, p.Y);
+        return true;
+    }
+
+    // 클릭 전용 스레드: 훅을 바로 끝내고(키 입력 지연 방지) 여기서 클릭한다
+    static void Worker()
+    {
+        foreach (Point[] job in jobs.GetConsumingEnumerable())
+        {
+            Point bell = job[0], back = job[1];
+            // 커서를 직접 옮기고 1px 왕복 이동 신호를 같이 보낸다.
+            // Roblox처럼 절대 좌표 이동을 가끔 못 알아채는 게임용 (roblox-dj-hotkey에서 확인한 방법)
+            SetCursorPos(bell.X, bell.Y);
+            Send(Rel(1, 0), Rel(-1, 0));
+            if (moveDelayMs > 0) Thread.Sleep(moveDelayMs);
+            if (holdMs <= 0) Send(MouseAt(bell, MOUSEEVENTF_LEFTDOWN), MouseAt(bell, MOUSEEVENTF_LEFTUP));
+            else
+            {
+                Send(MouseAt(bell, MOUSEEVENTF_LEFTDOWN));
+                Thread.Sleep(holdMs);
+                Send(MouseAt(bell, MOUSEEVENTF_LEFTUP));
+            }
+            if (returnCursor)
+            {
+                if (returnDelayMs > 0) Thread.Sleep(returnDelayMs);
+                Send(MouseAt(back, 0));
+            }
+            if (debug) Log("ring bell=" + bell + " back=" + back);
+        }
+    }
+
+    static void Log(string s)
+    {
+        try { lock (logLock) File.AppendAllText(logPath, DateTime.Now.ToString("HH:mm:ss.fff") + " " + s + Environment.NewLine); }
+        catch (Exception) { }
+    }
+
+    // 화면 좌표 위치에서 buttonFlags(누름/뗌, 없으면 이동만)를 처리하는 입력 1건.
+    // 좌표를 입력 안에 같이 실어 보내므로, 그 사이 커서가 움직여도 클릭은 그 자리에 들어간다 (click-macro와 같은 계산)
+    static INPUT MouseAt(Point pt, uint buttonFlags)
+    {
+        long left = GetSystemMetrics(SM_XVIRTUALSCREEN), top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        long width = GetSystemMetrics(SM_CXVIRTUALSCREEN), height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        var input = new INPUT { type = INPUT_MOUSE };
+        input.mi.dx = (int)(((pt.X - left) * 65536 + width - 1) / width); // 올림: 되돌려 계산하면 정확히 그 픽셀
+        input.mi.dy = (int)(((pt.Y - top) * 65536 + height - 1) / height);
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | buttonFlags;
+        return input;
+    }
+
+    static INPUT Rel(int dx, int dy)
+    {
+        return new INPUT { type = INPUT_MOUSE, mi = new MOUSEINPUT { dx = dx, dy = dy, dwFlags = MOUSEEVENTF_MOVE } };
+    }
+
+    static void Send(params INPUT[] inputs)
+    {
+        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    // F7: 커서 아래 창을 기준으로 종 위치를 저장
+    static void SaveBell(POINT p)
+    {
+        IntPtr root = GetAncestor(WindowFromPoint(p), GA_ROOT);
+        string name = root == IntPtr.Zero ? "" : ProcessNameOf(root);
+        if (name == "") { Beep(300); return; }
+        ScreenToClient(root, ref p);
+        targetProcess = name;
+        bellX = p.X;
+        bellY = p.Y;
+        hasBell = true;
+        lastHwnd = IntPtr.Zero; // 다음 종 키 때 앞 창을 다시 확인
+        try
+        {
+            var changes = new Dictionary<string, string>();
+            changes["TargetProcess"] = name;
+            changes["BellX"] = bellX.ToString();
+            changes["BellY"] = bellY.ToString();
+            WriteIni(changes);
+        }
+        catch (Exception ex)
+        {
+            tray.ShowBalloonTip(5000, "할리갈리 종", "설정 저장 실패 (이번 실행 동안만 적용): " + ex.Message, ToolTipIcon.Warning);
+        }
+        UpdateTray();
+        Beep(880, 1320);
+    }
+
+    static void Toggle()
+    {
+        enabled = !enabled;
+        if (debug) Log("toggle → enabled=" + enabled);
+        UpdateTray();
+        Beep(enabled ? 1200 : 500);
+    }
+
+    static void UpdateTray()
+    {
+        tray.Icon = !hasBell ? iconNoBell : enabled ? iconOn : iconOff;
+        string text = !hasBell ? "할리갈리 종: 위치 없음 (" + KeyName(setKey) + "로 저장)"
+                    : "할리갈리 종: " + (enabled ? "켜짐" : "꺼짐") + " / " + targetProcess;
+        tray.Text = text.Length > 63 ? text.Substring(0, 63) : text; // 트레이 글자 수 제한 63자
+        toggleItem.Checked = enabled;
+    }
+
+    static string ProcessNameOf(IntPtr hwnd)
+    {
+        uint pid;
+        GetWindowThreadProcessId(hwnd, out pid);
+        IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (h == IntPtr.Zero) return "";
+        try
+        {
+            var sb = new StringBuilder(1024);
+            int len = sb.Capacity;
+            return QueryFullProcessImageName(h, 0, sb, ref len) ? Path.GetFileNameWithoutExtension(sb.ToString()) : "";
+        }
+        finally { CloseHandle(h); }
+    }
+
+    static bool Pressed(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+
+    static bool IsModifier(uint vk) { return (vk >= 0x10 && vk <= 0x12) || (vk >= 0xA0 && vk <= 0xA5) || vk == VK_LWIN || vk == VK_RWIN; }
+
+    static string KeyName(uint vk) { return ((Keys)vk).ToString(); }
+
+    // 짧은 삑 소리 (UI 스레드 = 훅 스레드를 막지 않게 따로 돈다)
+    static void Beep(params int[] freqs)
+    {
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            try { foreach (int f in freqs) Console.Beep(f, 60); }
+            catch (Exception) { }
+        });
+    }
+
+    static Icon MakeIcon(Color c)
+    {
+        using (var bmp = new Bitmap(32, 32))
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var b = new SolidBrush(c)) g.FillEllipse(b, 2, 2, 28, 28);
+            return Icon.FromHandle(bmp.GetHicon());
+        }
+    }
+
+    // "Key=값" 줄의 Key (주석·섹션·빈 줄이면 null)
+    static string KeyOf(string line)
+    {
+        string t = line.Trim();
+        if (t.Length == 0 || t[0] == ';' || t[0] == '[') return null;
+        int eq = t.IndexOf('=');
+        return eq > 0 ? t.Substring(0, eq).Trim() : null;
+    }
+
+    static void LoadIni()
+    {
+        var v = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string line in File.ReadAllLines(iniPath, Encoding.UTF8))
+        {
+            string key = KeyOf(line);
+            if (key != null) v[key] = line.Substring(line.IndexOf('=') + 1).Trim();
+        }
+        bellKey = ParseKey(v, "BellKey", bellKey);
+        setKey = ParseKey(v, "SetKey", setKey);
+        toggleKey = ParseKey(v, "ToggleKey", toggleKey);
+        moveDelayMs = ParseInt(v, "MoveDelayMs", moveDelayMs);
+        holdMs = ParseInt(v, "HoldMs", holdMs);
+        returnDelayMs = ParseInt(v, "ReturnDelayMs", returnDelayMs);
+        returnCursor = ParseInt(v, "ReturnCursor", 1) != 0;
+        debug = ParseInt(v, "Debug", 0) != 0;
+
+        string s;
+        int x = 0, y = 0;
+        targetProcess = v.TryGetValue("TargetProcess", out s) ? s : "";
+        hasBell = targetProcess != ""
+               && v.TryGetValue("BellX", out s) && int.TryParse(s, out x)
+               && v.TryGetValue("BellY", out s) && int.TryParse(s, out y);
+        if (hasBell) { bellX = x; bellY = y; }
+    }
+
+    static void WriteIni(Dictionary<string, string> changes)
+    {
+        var lines = new List<string>(File.ReadAllLines(iniPath, Encoding.UTF8));
+        foreach (var c in changes)
+        {
+            string key = c.Key;
+            int i = lines.FindIndex(l => string.Equals(KeyOf(l), key, StringComparison.OrdinalIgnoreCase));
+            if (i >= 0) lines[i] = key + "=" + c.Value;
+            else lines.Add(key + "=" + c.Value);
+        }
+        File.WriteAllLines(iniPath, lines, new UTF8Encoding(false));
+    }
+
+    static uint ParseKey(Dictionary<string, string> v, string name, uint def)
+    {
+        string s;
+        Keys k;
+        if (v.TryGetValue(name, out s) && Enum.TryParse(s, true, out k) && (k & Keys.KeyCode) != Keys.None)
+            return (uint)(k & Keys.KeyCode);
+        return def;
+    }
+
+    static int ParseInt(Dictionary<string, string> v, string name, int def)
+    {
+        string s;
+        int n;
+        return v.TryGetValue(name, out s) && int.TryParse(s, out n) && n >= 0 ? n : def;
+    }
+
+    const string DefaultIni =
+@"; 할리갈리 종 단축키 설정 — 고친 뒤 프로그램을 다시 켜면 적용
+[Keys]
+; 키 이름 예: Space, Z, F7, D1(숫자 1), NumPad0, LControlKey
+; 종 치기
+BellKey=Space
+; 종 위치 저장 (마우스를 종 위에 올리고 누름)
+SetKey=F7
+; 켜기/끄기 (채팅 칠 때 끄기)
+ToggleKey=F8
+
+[Click]
+; 0 = 가장 빠름 (웹·일반 프로그램). 종이 가끔 안 눌리면 둘 다 20으로 (Roblox는 20 권장 — roblox-dj-hotkey 실측값)
+; 커서를 종으로 옮긴 뒤 누르기까지 대기(ms)
+MoveDelayMs=0
+; 누름~뗌 사이 대기(ms)
+HoldMs=0
+; 클릭 뒤 마우스를 원래 자리로 되돌림 (1 = 예, 0 = 종 위에 그대로)
+ReturnCursor=1
+; 되돌리기 전 대기(ms). 게임이 클릭 위치를 늦게 읽어 엉뚱한 곳이 눌리면 늘린다
+ReturnDelayMs=30
+; 1이면 누른 키와 클릭 위치를 HalliBell.log에 기록 (문제 확인용)
+Debug=0
+
+[Bell]
+; F7을 누르면 자동 저장 (종이 있는 창의 프로그램 이름, 그 창 안쪽 기준 좌표)
+TargetProcess=
+BellX=
+BellY=
+";
+}

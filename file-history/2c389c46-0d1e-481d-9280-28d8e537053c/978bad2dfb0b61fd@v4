@@ -1,0 +1,618 @@
+// Roblox 할리갈리 단축키 (종 치기 + 카드 내기)
+// F7    = 마우스를 종 위에 올리고 누르면 그 자리를 종 위치로 저장
+// F6    = 마우스를 '카드 내기' 버튼 위에 올리고 누르면 그 자리를 저장
+// S     = 종 클릭, F = 카드 내기 클릭. 클릭 뒤 마우스는 원래 자리로 돌아온다
+//         위치를 저장한 프로그램 창이 앞에 있을 때만 동작하고, 그때 이 키들은 게임에 보내지 않는다
+//         (Ctrl/Alt/Shift/Win과 함께 누르면 원래대로)
+// F8    = 켜기/끄기 (채팅 칠 때 끄기)
+// 키는 트레이 아이콘 우클릭 → "키 설정..."(또는 아이콘 더블클릭)에서 바꾼다. 바로 적용되고 .ini에 저장된다.
+// 창 크기가 위치를 저장할 때와 다르면 엉뚱한 곳을 누르지 않게 클릭하지 않고 낮은 삑 소리를 낸다.
+// 키·클릭 타이밍은 exe와 같은 이름의 .ini에서 바꾼다.
+// 빌드: build.bat (Windows 기본 .NET Framework 컴파일러, 설치 불필요)
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+
+// 단축키로 누를 게임 속 버튼 하나
+class Spot
+{
+    public string Name, Ini;   // 화면 표시 이름, .ini 키 앞부분
+    public uint Key, SaveKey;  // 누르는 키, 위치 저장 키
+    public int X, Y;           // 게임 창 안쪽(제목 표시줄 아래) 기준 픽셀
+    public bool Has;           // 위치가 저장돼 있는지
+    public bool Down;          // 키를 막은 채 누르고 있는 중 → 꾹 누름 반복·뗌도 같이 막는다
+}
+
+static class HalliBell
+{
+    const int WH_KEYBOARD_LL = 13;
+    const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104;
+    const int VK_SHIFT = 0x10, VK_CONTROL = 0x11, VK_MENU = 0x12, VK_LWIN = 0x5B, VK_RWIN = 0x5C;
+    const uint INPUT_MOUSE = 0;
+    const uint MOUSEEVENTF_MOVE = 0x0001, MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004;
+    const uint GA_ROOT = 2, PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct KBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT { public uint type; public MOUSEINPUT mi; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINT { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct RECT { public int Left, Top, Right, Bottom; }
+
+    delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int idHook, HookProc fn, IntPtr hMod, uint threadId);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
+    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr hWnd, ref POINT p);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+    [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int value);
+    [DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint ms);
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr h, uint flags, StringBuilder name, ref int size);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+
+    // 훅이 도는 동안 GC에 수거되지 않게 붙잡아 둔다
+    static readonly HookProc keyProc = KeyCallback;
+    static IntPtr keyHook;
+    static string iniPath, logPath;
+
+    static readonly Spot bell = new Spot { Name = "종", Ini = "Bell", Key = (uint)Keys.S, SaveKey = (uint)Keys.F7 };
+    static readonly Spot card = new Spot { Name = "카드", Ini = "Card", Key = (uint)Keys.F, SaveKey = (uint)Keys.F6 };
+    static readonly Spot[] spots = { bell, card };
+
+    // 설정 (.ini)
+    static uint toggleKey = (uint)Keys.F8;
+    // Roblox는 너무 빨리 누르면 못 알아듣는다. roblox-dj-hotkey 실측(10·40ms 모두 성공) 기준
+    static int moveDelayMs = 10, holdMs = 10, returnDelayMs = 10;
+    static bool returnCursor = true;
+    static bool debug; // 1이면 HalliBell.log에 키·클릭 기록 (문제 확인용)
+    static string targetProcess = ""; // 위치를 저장한 창의 프로그램 이름 (예: RobloxPlayerBeta)
+    static int windowWidth, windowHeight; // 위치를 저장할 때의 그 창 안쪽 크기
+
+    // 아래 상태는 모두 UI 스레드(= 훅이 불리는 스레드)에서만 바꾼다
+    static bool enabled = true;
+    static readonly HashSet<uint> held = new HashSet<uint>();
+    static IntPtr lastHwnd;
+    static bool lastIsTarget;
+    static Action<uint> keyCapture; // 키 설정 창이 '키 입력 대기' 중이면, 다음에 누른 키를 여기로 넘긴다
+    static Form keyForm;
+
+    static readonly BlockingCollection<Point[]> jobs = new BlockingCollection<Point[]>(); // {누를 위치, 되돌아갈 위치}
+    static readonly object logLock = new object();
+    static Control ui; // 훅 안에서 무거운 일(파일 저장 등)을 훅이 끝난 뒤로 미루는 용도
+    static NotifyIcon tray;
+    static ToolStripMenuItem toggleItem;
+    static Icon iconOn, iconOff, iconMissing;
+
+    [STAThread]
+    static void Main(string[] args)
+    {
+        bool created;
+        using (new Mutex(true, "HalliGalliBell", out created))
+        {
+            if (!created) { MessageBox.Show("이미 실행 중입니다. (작업 표시줄 오른쪽 트레이 아이콘)", "할리갈리 단축키"); return; }
+
+            try { SetProcessDpiAwareness(2); }
+            catch (Exception) { try { SetProcessDPIAware(); } catch (Exception) { } }
+            try { timeBeginPeriod(1); } catch (Exception) { } // 짧은 대기(ms)가 15ms 단위로 늘어지지 않게
+
+            iniPath = Path.ChangeExtension(Application.ExecutablePath, ".ini");
+            logPath = Path.ChangeExtension(Application.ExecutablePath, ".log");
+            if (!File.Exists(iniPath)) File.WriteAllText(iniPath, DefaultIni, new UTF8Encoding(false));
+            LoadIni();
+
+            ui = new Control();
+            IntPtr forceHandle = ui.Handle;
+
+            iconOn = MakeIcon(Color.FromArgb(34, 197, 94));
+            iconOff = MakeIcon(Color.FromArgb(150, 150, 150));
+            iconMissing = MakeIcon(Color.FromArgb(245, 158, 11));
+            tray = new NotifyIcon { Visible = true };
+            var menu = new ContextMenuStrip();
+            menu.Items.Add("키 설정...", null, delegate { ShowKeyForm(); });
+            tray.DoubleClick += delegate { ShowKeyForm(); };
+            toggleItem = new ToolStripMenuItem("켜짐 (" + KeyName(toggleKey) + ")", null, delegate { Toggle(); });
+            menu.Items.Add(toggleItem);
+            menu.Items.Add("설정 파일 열기", null, delegate { Process.Start("notepad.exe", "\"" + iniPath + "\""); });
+            menu.Items.Add("종료", null, delegate { Application.Exit(); });
+            tray.ContextMenuStrip = menu;
+            UpdateTray();
+
+            var worker = new Thread(Worker) { IsBackground = true, Priority = ThreadPriority.Highest };
+            worker.Start();
+
+            keyHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyProc, GetModuleHandle(null), 0);
+            if (keyHook == IntPtr.Zero)
+            {
+                tray.Visible = false;
+                MessageBox.Show("키보드 훅 설치 실패 (오류 " + Marshal.GetLastWin32Error() + ")", "할리갈리 단축키");
+                return;
+            }
+
+            if (!bell.Has || !card.Has)
+                tray.ShowBalloonTip(6000, "할리갈리 단축키",
+                    "게임에서 종 위에 마우스 → " + KeyName(bell.SaveKey) + ", 카드 내기 버튼 위에 마우스 → " + KeyName(card.SaveKey), ToolTipIcon.Info);
+            if (Array.IndexOf(args, "/keys") >= 0) ShowKeyForm(); // 바로가기에 /keys를 붙이면 키 설정 창부터 연다
+
+            Application.Run();
+            UnhookWindowsHookEx(keyHook);
+            tray.Visible = false;
+        }
+    }
+
+    static IntPtr KeyCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            var k = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
+            int msg = wParam.ToInt32();
+            bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            uint vk = k.vkCode;
+
+            // 키 설정 창이 키 입력을 기다리는 중: 게임·다른 기능에 보내지 않고 그 칸에 넣는다 (F6~F8처럼 평소 막는 키도 받기 위해 훅에서 처리)
+            if (keyCapture != null)
+            {
+                if (down)
+                {
+                    Action<uint> cb = keyCapture;
+                    keyCapture = null;
+                    ui.BeginInvoke((Action)(() => cb(vk)));
+                }
+                return (IntPtr)1;
+            }
+
+            foreach (Spot s in spots)
+            {
+                if (vk == s.Key)
+                {
+                    if (debug) Log("key " + KeyName(vk) + (down ? " down" : " up") + " enabled=" + enabled + " held=" + s.Down);
+                    if (down)
+                    {
+                        if (s.Down) return (IntPtr)1; // 꾹 누를 때 들어오는 반복 입력 (이미 한 번 눌렀음)
+                        Point at;
+                        if (CanClick(s, out at))
+                        {
+                            s.Down = true;
+                            POINT cur;
+                            GetCursorPos(out cur);
+                            jobs.Add(new[] { at, new Point(cur.X, cur.Y) });
+                            return (IntPtr)1;
+                        }
+                    }
+                    else if (s.Down)
+                    {
+                        s.Down = false;
+                        return (IntPtr)1;
+                    }
+                    return CallNextHookEx(keyHook, nCode, wParam, lParam);
+                }
+                if (vk == s.SaveKey)
+                {
+                    if (down)
+                    {
+                        if (held.Add(vk))
+                        {
+                            POINT p;
+                            GetCursorPos(out p);
+                            Spot target = s;
+                            ui.BeginInvoke((Action)(() => SavePos(target, p)));
+                        }
+                    }
+                    else held.Remove(vk);
+                    return (IntPtr)1; // 게임에 보내지 않는다
+                }
+            }
+            if (vk == toggleKey)
+            {
+                if (down) { if (held.Add(vk)) ui.BeginInvoke((Action)Toggle); }
+                else held.Remove(vk);
+                return (IntPtr)1;
+            }
+        }
+        return CallNextHookEx(keyHook, nCode, wParam, lParam);
+    }
+
+    // 지금 눌러도 되면 화면 좌표로 누를 위치를 돌려준다
+    static bool CanClick(Spot s, out Point at)
+    {
+        at = Point.Empty;
+        if (!enabled || !s.Has) return false;
+        if (!IsModifier(s.Key) && (Pressed(VK_CONTROL) || Pressed(VK_MENU) || Pressed(VK_SHIFT) || Pressed(VK_LWIN) || Pressed(VK_RWIN)))
+            return false; // Ctrl+Space(한/영 전환 등) 같은 조합은 원래대로
+
+        IntPtr fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero) return false;
+        if (fg != lastHwnd)
+        {
+            lastHwnd = fg;
+            lastIsTarget = string.Equals(ProcessNameOf(fg), targetProcess, StringComparison.OrdinalIgnoreCase);
+        }
+        if (!lastIsTarget) return false;
+
+        RECT rc;
+        GetClientRect(fg, out rc);
+        if (rc.Right != windowWidth || rc.Bottom != windowHeight)
+        {
+            // 창 크기가 바뀌면 Roblox 화면 배치도 바뀌어 엉뚱한 곳을 누르게 된다 → 누르지 않고 알림
+            if (debug) Log("창 크기 다름: 지금 " + rc.Right + "x" + rc.Bottom + ", 저장 " + windowWidth + "x" + windowHeight);
+            Beep(300);
+            return false;
+        }
+        var p = new POINT { X = s.X, Y = s.Y };
+        ClientToScreen(fg, ref p);
+        at = new Point(p.X, p.Y);
+        return true;
+    }
+
+    // 클릭 전용 스레드: 훅을 바로 끝내고(키 입력 지연 방지) 여기서 클릭한다.
+    // 순서·방식은 roblox-dj-hotkey에서 Roblox로 확인한 것과 같다 (이동 → 대기 → 누름 → 대기 → 뗌 → 대기 → 복귀)
+    static void Worker()
+    {
+        foreach (Point[] job in jobs.GetConsumingEnumerable())
+        {
+            MoveTo(job[0]);
+            Wait(moveDelayMs);
+            SendButton(MOUSEEVENTF_LEFTDOWN);
+            Wait(holdMs);
+            SendButton(MOUSEEVENTF_LEFTUP);
+            if (returnCursor)
+            {
+                Wait(returnDelayMs);
+                MoveTo(job[1]);
+            }
+            if (debug) Log("click at=" + job[0] + " back=" + job[1]);
+        }
+    }
+
+    static void Wait(int ms) { if (ms > 0) Thread.Sleep(ms); }
+
+    // Roblox는 절대 좌표 이동(SendInput ABSOLUTE)을 가끔 못 알아채고 클릭을 원래 커서 자리에 처리한다.
+    // 그래서 커서를 직접 옮긴 뒤, 실제 마우스처럼 1px 상대 이동 신호를 보내 새 위치를 읽게 한다 (roblox-dj-hotkey와 같은 방법)
+    static void MoveTo(Point p)
+    {
+        SetCursorPos(p.X, p.Y);
+        Send(new INPUT { type = INPUT_MOUSE, mi = new MOUSEINPUT { dx = 1, dwFlags = MOUSEEVENTF_MOVE } },
+             new INPUT { type = INPUT_MOUSE, mi = new MOUSEINPUT { dx = -1, dwFlags = MOUSEEVENTF_MOVE } });
+    }
+
+    static void SendButton(uint flags)
+    {
+        Send(new INPUT { type = INPUT_MOUSE, mi = new MOUSEINPUT { dwFlags = flags } });
+    }
+
+    static void Send(params INPUT[] inputs)
+    {
+        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    // F7/F6: 커서 아래 창을 기준으로 위치 저장
+    static void SavePos(Spot s, POINT p)
+    {
+        IntPtr root = GetAncestor(WindowFromPoint(p), GA_ROOT);
+        string name = root == IntPtr.Zero ? "" : ProcessNameOf(root);
+        if (name == "") { Beep(300); return; }
+        RECT rc;
+        GetClientRect(root, out rc);
+        ScreenToClient(root, ref p);
+
+        var changes = new Dictionary<string, string>();
+        // 다른 창이거나 창 크기가 바뀌었으면, 이전에 저장한 다른 버튼 위치는 더 이상 맞지 않는다 → 지움
+        if (!string.Equals(name, targetProcess, StringComparison.OrdinalIgnoreCase) || rc.Right != windowWidth || rc.Bottom != windowHeight)
+        {
+            foreach (Spot o in spots)
+            {
+                if (o == s || !o.Has) continue;
+                o.Has = false;
+                changes[o.Ini + "X"] = "";
+                changes[o.Ini + "Y"] = "";
+            }
+        }
+        targetProcess = name;
+        windowWidth = rc.Right;
+        windowHeight = rc.Bottom;
+        s.X = p.X;
+        s.Y = p.Y;
+        s.Has = true;
+        lastHwnd = IntPtr.Zero; // 다음 키 때 앞 창을 다시 확인
+        changes["TargetProcess"] = name;
+        changes["WindowWidth"] = windowWidth.ToString();
+        changes["WindowHeight"] = windowHeight.ToString();
+        changes[s.Ini + "X"] = s.X.ToString();
+        changes[s.Ini + "Y"] = s.Y.ToString();
+        try { WriteIni(changes); }
+        catch (Exception ex)
+        {
+            tray.ShowBalloonTip(5000, "할리갈리 단축키", "설정 저장 실패 (이번 실행 동안만 적용): " + ex.Message, ToolTipIcon.Warning);
+        }
+        if (debug) Log("save " + s.Ini + " " + name + " " + windowWidth + "x" + windowHeight + " (" + s.X + "," + s.Y + ")");
+        UpdateTray();
+        Beep(880, 1320);
+    }
+
+    static void Toggle()
+    {
+        enabled = !enabled;
+        if (debug) Log("toggle → enabled=" + enabled);
+        UpdateTray();
+        Beep(enabled ? 1200 : 500);
+    }
+
+    // 키 설정 창: 항목 버튼을 누른 뒤 원하는 키를 누르면 바로 적용하고 .ini에 저장한다
+    static void ShowKeyForm()
+    {
+        if (keyForm != null) { keyForm.Activate(); return; }
+
+        var slots = new[]
+        {
+            new { Label = "종 치기", Ini = "BellKey", Get = (Func<uint>)(() => bell.Key), Set = (Action<uint>)(v => bell.Key = v) },
+            new { Label = "카드 내기", Ini = "CardKey", Get = (Func<uint>)(() => card.Key), Set = (Action<uint>)(v => card.Key = v) },
+            new { Label = "종 위치 저장", Ini = "BellSaveKey", Get = (Func<uint>)(() => bell.SaveKey), Set = (Action<uint>)(v => bell.SaveKey = v) },
+            new { Label = "카드 위치 저장", Ini = "CardSaveKey", Get = (Func<uint>)(() => card.SaveKey), Set = (Action<uint>)(v => card.SaveKey = v) },
+            new { Label = "켜기/끄기", Ini = "ToggleKey", Get = (Func<uint>)(() => toggleKey), Set = (Action<uint>)(v => toggleKey = v) },
+        };
+
+        var f = new Form();
+        f.SuspendLayout();
+        f.AutoScaleDimensions = new SizeF(96F, 96F); // 아래 크기는 화면 배율 100% 기준 → 배율에 맞춰 커진다
+        f.AutoScaleMode = AutoScaleMode.Dpi;
+        f.Text = "할리갈리 단축키 설정";
+        f.Font = new Font("Malgun Gothic", 10F);
+        f.FormBorderStyle = FormBorderStyle.FixedDialog;
+        f.MaximizeBox = false;
+        f.MinimizeBox = false;
+        f.StartPosition = FormStartPosition.CenterScreen;
+        f.TopMost = true; // Roblox 위에 뜨게
+        f.ClientSize = new Size(340, 300);
+        const string hint = "바꿀 항목의 버튼을 누른 다음, 원하는 키를 누르세요.";
+        var status = new Label { Location = new Point(16, 212), Size = new Size(310, 44), Text = hint };
+        var buttons = new Button[slots.Length];
+        int capturing = -1;
+        for (int i = 0; i < slots.Length; i++)
+        {
+            int row = i;
+            f.Controls.Add(new Label { Text = slots[i].Label, Location = new Point(16, 20 + i * 38), Size = new Size(140, 24) });
+            var b = new Button { Text = KeyName(slots[i].Get()), Location = new Point(170, 14 + i * 38), Size = new Size(154, 32) };
+            buttons[i] = b;
+            b.Click += delegate
+            {
+                if (capturing >= 0) buttons[capturing].Text = KeyName(slots[capturing].Get());
+                capturing = row;
+                b.Text = "키를 누르세요…";
+                status.Text = "'" + slots[row].Label + "'에 쓸 키를 누르세요. (Esc = 취소)";
+                keyCapture = vk =>
+                {
+                    capturing = -1;
+                    if (f.IsDisposed) return;
+                    b.Text = KeyName(slots[row].Get());
+                    if (vk == (uint)Keys.Escape) { status.Text = "취소했어요."; return; }
+                    for (int j = 0; j < slots.Length; j++)
+                        if (j != row && slots[j].Get() == vk)
+                        {
+                            status.Text = KeyName(vk) + " 키는 이미 '" + slots[j].Label + "'에 쓰고 있어요.";
+                            return;
+                        }
+                    slots[row].Set(vk);
+                    foreach (Spot s in spots) s.Down = false; // 바뀌기 전 키를 누른 채였던 상태 정리
+                    held.Clear();
+                    b.Text = KeyName(vk);
+                    UpdateTray();
+                    try
+                    {
+                        var changes = new Dictionary<string, string>();
+                        changes[slots[row].Ini] = ((Keys)vk).ToString();
+                        WriteIni(changes);
+                        status.Text = "'" + slots[row].Label + "' = " + KeyName(vk) + " 저장했어요. 바로 적용됩니다.";
+                    }
+                    catch (Exception ex) { status.Text = "저장 실패 (이번 실행 동안만 적용): " + ex.Message; }
+                    if (debug) Log("key set " + slots[row].Ini + "=" + (Keys)vk);
+                };
+            };
+            f.Controls.Add(b);
+        }
+        var close = new Button { Text = "닫기", Location = new Point(234, 258), Size = new Size(90, 32) };
+        close.Click += delegate { f.Close(); };
+        f.Controls.Add(status);
+        f.Controls.Add(close);
+        f.FormClosed += delegate { keyCapture = null; keyForm = null; };
+        f.ResumeLayout(false);
+        keyForm = f;
+        f.Show();
+        f.Activate();
+    }
+
+    static void UpdateTray()
+    {
+        bool all = bell.Has && card.Has;
+        tray.Icon = !all ? iconMissing : enabled ? iconOn : iconOff;
+        string text = "할리갈리: " + (enabled ? "켜짐" : "꺼짐")
+                    + " / 종 " + (bell.Has ? "O" : "X(" + KeyName(bell.SaveKey) + ")")
+                    + " 카드 " + (card.Has ? "O" : "X(" + KeyName(card.SaveKey) + ")");
+        tray.Text = text.Length > 63 ? text.Substring(0, 63) : text; // 트레이 글자 수 제한 63자
+        toggleItem.Text = "켜짐 (" + KeyName(toggleKey) + ")";
+        toggleItem.Checked = enabled;
+    }
+
+    static string ProcessNameOf(IntPtr hwnd)
+    {
+        uint pid;
+        GetWindowThreadProcessId(hwnd, out pid);
+        IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (h == IntPtr.Zero) return "";
+        try
+        {
+            var sb = new StringBuilder(1024);
+            int len = sb.Capacity;
+            return QueryFullProcessImageName(h, 0, sb, ref len) ? Path.GetFileNameWithoutExtension(sb.ToString()) : "";
+        }
+        finally { CloseHandle(h); }
+    }
+
+    static bool Pressed(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+
+    static bool IsModifier(uint vk) { return (vk >= 0x10 && vk <= 0x12) || (vk >= 0xA0 && vk <= 0xA5) || vk == VK_LWIN || vk == VK_RWIN; }
+
+    // 화면 표시용 키 이름 (숫자 키 D1 → 1). .ini에는 Keys 이름 그대로 저장한다
+    static string KeyName(uint vk) { return vk >= 0x30 && vk <= 0x39 ? ((char)vk).ToString() : ((Keys)vk).ToString(); }
+
+    // 짧은 삑 소리 (UI 스레드 = 훅 스레드를 막지 않게 따로 돈다)
+    static void Beep(params int[] freqs)
+    {
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            try { foreach (int f in freqs) Console.Beep(f, 60); }
+            catch (Exception) { }
+        });
+    }
+
+    static void Log(string s)
+    {
+        try { lock (logLock) File.AppendAllText(logPath, DateTime.Now.ToString("HH:mm:ss.fff") + " " + s + Environment.NewLine); }
+        catch (Exception) { }
+    }
+
+    static Icon MakeIcon(Color c)
+    {
+        using (var bmp = new Bitmap(32, 32))
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var b = new SolidBrush(c)) g.FillEllipse(b, 2, 2, 28, 28);
+            return Icon.FromHandle(bmp.GetHicon());
+        }
+    }
+
+    // "Key=값" 줄의 Key (주석·섹션·빈 줄이면 null)
+    static string KeyOf(string line)
+    {
+        string t = line.Trim();
+        if (t.Length == 0 || t[0] == ';' || t[0] == '[') return null;
+        int eq = t.IndexOf('=');
+        return eq > 0 ? t.Substring(0, eq).Trim() : null;
+    }
+
+    static void LoadIni()
+    {
+        var v = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string line in File.ReadAllLines(iniPath, Encoding.UTF8))
+        {
+            string key = KeyOf(line);
+            if (key != null) v[key] = line.Substring(line.IndexOf('=') + 1).Trim();
+        }
+        bell.Key = ParseKey(v, "BellKey", bell.Key);
+        bell.SaveKey = ParseKey(v, "BellSaveKey", bell.SaveKey);
+        card.Key = ParseKey(v, "CardKey", card.Key);
+        card.SaveKey = ParseKey(v, "CardSaveKey", card.SaveKey);
+        toggleKey = ParseKey(v, "ToggleKey", toggleKey);
+        moveDelayMs = ParseInt(v, "MoveDelayMs", moveDelayMs);
+        holdMs = ParseInt(v, "HoldMs", holdMs);
+        // 0이면 커서가 클릭이 처리되기 전에 돌아가 원래 자리가 눌릴 수 있다 → 최소 5
+        returnDelayMs = Math.Max(5, ParseInt(v, "ReturnDelayMs", returnDelayMs));
+        returnCursor = ParseInt(v, "ReturnCursor", 1) != 0;
+        debug = ParseInt(v, "Debug", 0) != 0;
+
+        string s;
+        targetProcess = v.TryGetValue("TargetProcess", out s) ? s : "";
+        windowWidth = ParseInt(v, "WindowWidth", 0);
+        windowHeight = ParseInt(v, "WindowHeight", 0);
+        bool windowKnown = targetProcess != "" && windowWidth > 0 && windowHeight > 0;
+        foreach (Spot o in spots)
+        {
+            int x = ParseInt(v, o.Ini + "X", -1), y = ParseInt(v, o.Ini + "Y", -1);
+            o.Has = windowKnown && x >= 0 && y >= 0;
+            if (o.Has) { o.X = x; o.Y = y; }
+        }
+    }
+
+    static void WriteIni(Dictionary<string, string> changes)
+    {
+        var lines = new List<string>(File.ReadAllLines(iniPath, Encoding.UTF8));
+        foreach (var c in changes)
+        {
+            string key = c.Key;
+            int i = lines.FindIndex(l => string.Equals(KeyOf(l), key, StringComparison.OrdinalIgnoreCase));
+            if (i >= 0) lines[i] = key + "=" + c.Value;
+            else lines.Add(key + "=" + c.Value);
+        }
+        File.WriteAllLines(iniPath, lines, new UTF8Encoding(false));
+    }
+
+    static uint ParseKey(Dictionary<string, string> v, string name, uint def)
+    {
+        string s;
+        Keys k;
+        if (v.TryGetValue(name, out s) && Enum.TryParse(s, true, out k) && (k & Keys.KeyCode) != Keys.None)
+            return (uint)(k & Keys.KeyCode);
+        return def;
+    }
+
+    static int ParseInt(Dictionary<string, string> v, string name, int def)
+    {
+        string s;
+        int n;
+        return v.TryGetValue(name, out s) && int.TryParse(s, out n) && n >= 0 ? n : def;
+    }
+
+    const string DefaultIni =
+@"; Roblox 할리갈리 단축키 설정 — 고친 뒤 프로그램을 다시 켜면 적용
+[Keys]
+; 트레이 아이콘 우클릭 → '키 설정...'에서 바꾸면 바로 적용된다 (여기서 직접 고쳐도 됨, 그때는 다시 켜야 적용)
+; 키 이름 예: Space, F, Z, F6, D1(숫자 1), NumPad0
+; 종 치기 / 종 위치 저장 (마우스를 종 위에 올리고 누름)
+BellKey=S
+BellSaveKey=F7
+; 카드 내기 / 카드 내기 버튼 위치 저장 (마우스를 그 버튼 위에 올리고 누름)
+CardKey=F
+CardSaveKey=F6
+; 켜기/끄기 (채팅 칠 때 끄기)
+ToggleKey=F8
+
+[Click]
+; 클릭 단계(이동 → 누름 → 뗌 → 복귀) 사이 대기(ms)
+; Roblox는 너무 빨리 누르면 못 알아듣는다. roblox-dj-hotkey 실측(10·40 모두 성공) 기준 10. 가끔 안 눌리면 셋 다 20
+MoveDelayMs=10
+HoldMs=10
+; 5 미만은 5로 처리 (너무 빨리 돌아가면 원래 자리가 눌림)
+ReturnDelayMs=10
+; 클릭 뒤 마우스를 원래 자리로 되돌림 (1 = 예, 0 = 그 버튼 위에 그대로)
+ReturnCursor=1
+; 1이면 누른 키와 클릭 위치를 HalliBell.log에 기록 (문제 확인용)
+Debug=0
+
+[Saved]
+; F7/F6을 누르면 자동 저장 (그 창의 프로그램 이름·안쪽 크기, 창 안쪽 기준 좌표). 직접 고칠 필요 없음
+TargetProcess=
+WindowWidth=
+WindowHeight=
+BellX=
+BellY=
+CardX=
+CardY=
+";
+}

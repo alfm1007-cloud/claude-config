@@ -1,0 +1,13 @@
+param([int]$SliderY, [int]$ClickDelay, [int]$Count = 30, [int]$Seed = 7)
+# Restart DjSpeed with the given SliderY / ClickDelay in the project ini, then run the in-game trials.
+$dir = "C:\Users\alfm1\Desktop\Claude\roblox-dj-hotkey"
+$ini = "$dir\DjSpeed.ini"
+Get-Process DjSpeed -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 300
+$lines = Get-Content $ini -Encoding UTF8
+$lines = $lines -replace '^SliderY=.*', "SliderY=$SliderY"
+if ($lines -match '^ClickDelay=') { $lines = $lines -replace '^ClickDelay=.*', "ClickDelay=$ClickDelay" } else { $lines += "ClickDelay=$ClickDelay" }
+$lines | Set-Content $ini -Encoding UTF8
+Start-Process "$dir\DjSpeed.exe" -WorkingDirectory $dir
+Start-Sleep -Milliseconds 800
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File "$PSScriptRoot\rbx_trials.ps1" -Count $Count -Seed $Seed -Label ("y={0} (screen {1}) delay={2}ms" -f $SliderY, ($SliderY + 23), $ClickDelay)

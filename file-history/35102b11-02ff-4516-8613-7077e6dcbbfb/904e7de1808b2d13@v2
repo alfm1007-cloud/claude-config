@@ -1,0 +1,6 @@
+; Roblox DJ 배속 단축키 설정
+[General]
+; 단축키가 동작할 프로그램 이름 (작업 관리자 > 세부 정보의 이름에서 .exe를 뺀 것)
+TargetProcess=RobloxPlayerBeta
+; 1로 바꾸면 누른 키와 배속을 DjSpeed.log에 기록 (문제 확인용)
+Debug=0

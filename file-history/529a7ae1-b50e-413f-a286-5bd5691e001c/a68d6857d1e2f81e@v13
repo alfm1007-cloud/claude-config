@@ -1,0 +1,25 @@
+"""절대좌표 마우스 입력 (exe와 같은 방식: 이동과 버튼 동작을 입력 1건에 합침)."""
+import ctypes
+from ctypes import wintypes
+
+from rbx_lib import u
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("mi", MOUSEINPUT)]
+
+
+u.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+u.GetSystemMetrics.argtypes = [ctypes.c_int]
+SL, ST, SW, SH = (u.GetSystemMetrics(i) for i in (76, 77, 78, 79))
+ABS, DOWN, UP = 0x0001 | 0x8000 | 0x4000, 0x0002, 0x0004
+
+
+def send(x, y, flags):
+    inp = INPUT(0, MOUSEINPUT(((x - SL) * 65536 + SW - 1) // SW, ((y - ST) * 65536 + SH - 1) // SH, 0, ABS | flags, 0, 0))
+    u.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))

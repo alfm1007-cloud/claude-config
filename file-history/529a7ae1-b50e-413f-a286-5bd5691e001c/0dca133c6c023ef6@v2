@@ -1,0 +1,19 @@
+"""테스트용 대상 창: 받은 클릭을 비율로 파일에 기록."""
+import sys
+import tkinter as tk
+
+out_path = sys.argv[1]
+root = tk.Tk()
+root.title("ClickMacroTestTarget")
+root.geometry("420x320+200+200")
+canvas = tk.Canvas(root, bg="white", highlightthickness=0)
+canvas.pack(fill="both", expand=True)
+
+
+def on_click(e):
+    with open(out_path, "a", encoding="utf-8") as f:
+        f.write(f"{e.x / canvas.winfo_width():.4f},{e.y / canvas.winfo_height():.4f}\n")
+
+
+canvas.bind("<Button-1>", on_click)
+root.mainloop()

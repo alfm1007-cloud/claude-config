@@ -1,0 +1,223 @@
+// Roblox DJ 배속 단축키
+// F1~F10 = x0.1~x1.0, F12 = x0, F11 = 막기만, 텐키 + / - = 한 단계(0.1)씩
+// Roblox 창이 앞에 있을 때만 동작하고, 그동안 F1~F12와 텐키 + / -는 게임에 전달하지 않는다.
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
+
+static class DjSpeed
+{
+    const int WH_KEYBOARD_LL = 13;
+    const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104;
+    const uint VK_F1 = 0x70, VK_F10 = 0x79, VK_F12 = 0x7B, VK_ADD = 0x6B, VK_SUBTRACT = 0x6D;
+    const uint INPUT_MOUSE = 0;
+    const uint MOUSEEVENTF_MOVE = 0x0001, MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004;
+    const uint MOUSEEVENTF_VIRTUALDESK = 0x4000, MOUSEEVENTF_ABSOLUTE = 0x8000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct KBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT { public uint type; public MOUSEINPUT mi; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINT { public int X, Y; }
+
+    delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int idHook, HookProc fn, IntPtr hMod, uint threadId);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+
+    static readonly HookProc hookProc = HookCallback; // 훅이 도는 동안 GC에 수거되지 않게 붙잡아 둔다
+    static IntPtr hook;
+    static string targetProcess = "RobloxPlayerBeta";
+    static bool debug;
+    static string logPath;
+
+    static int level = 10; // 현재 배속(0.1 단위, 0~10). 시작은 x1.0으로 가정
+    static readonly HashSet<uint> held = new HashSet<uint>(); // 꾹 누를 때 들어오는 반복 입력 무시용
+    static readonly BlockingCollection<int> jobs = new BlockingCollection<int>();
+    static IntPtr lastHwnd;
+    static bool lastIsTarget;
+    static NotifyIcon tray;
+
+    [STAThread]
+    static void Main()
+    {
+        bool created;
+        using (new Mutex(true, "RobloxDjSpeed", out created))
+        {
+            if (!created) { MessageBox.Show("이미 실행 중입니다.", "DJ 배속"); return; }
+
+            SetProcessDPIAware();
+            LoadIni();
+
+            tray = new NotifyIcon { Icon = SystemIcons.Application, Visible = true };
+            var menu = new ContextMenuStrip();
+            menu.Items.Add("종료", null, delegate { Application.Exit(); });
+            tray.ContextMenuStrip = menu;
+            UpdateTray();
+
+            new Thread(Worker) { IsBackground = true }.Start();
+
+            hook = SetWindowsHookEx(WH_KEYBOARD_LL, hookProc, GetModuleHandle(null), 0);
+            if (hook == IntPtr.Zero)
+            {
+                tray.Visible = false;
+                MessageBox.Show("키보드 감지를 시작하지 못했습니다. (오류 " + Marshal.GetLastWin32Error() + ")", "DJ 배속");
+                return;
+            }
+            Log("시작 (대상: " + targetProcess + ")");
+
+            Application.Run();
+
+            UnhookWindowsHookEx(hook);
+            tray.Visible = false;
+        }
+    }
+
+    static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            var kb = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
+            uint vk = kb.vkCode;
+            if ((vk >= VK_F1 && vk <= VK_F12) || vk == VK_ADD || vk == VK_SUBTRACT)
+            {
+                int msg = wParam.ToInt32();
+                bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                if (!down) held.Remove(vk); // 다른 창으로 넘어간 뒤에 뗀 키도 풀어 준다
+                if (IsTargetForeground())
+                {
+                    if (down && held.Add(vk)) OnKey(vk);
+                    return (IntPtr)1; // 게임에 전달하지 않음
+                }
+            }
+        }
+        return CallNextHookEx(hook, nCode, wParam, lParam);
+    }
+
+    static void OnKey(uint vk)
+    {
+        int next;
+        if (vk >= VK_F1 && vk <= VK_F10) next = (int)(vk - VK_F1) + 1;
+        else if (vk == VK_F12) next = 0;
+        else if (vk == VK_ADD) next = Math.Min(level + 1, 10);
+        else if (vk == VK_SUBTRACT) next = Math.Max(level - 1, 0);
+        else return; // F11: 막기만 한다
+
+        level = next;
+        UpdateTray();
+        jobs.Add(next); // 클릭은 작업 스레드에서. 훅은 바로 돌려줘야 Windows가 끊지 않는다
+    }
+
+    static bool IsTargetForeground()
+    {
+        IntPtr hwnd = GetForegroundWindow();
+        if (hwnd != lastHwnd)
+        {
+            lastHwnd = hwnd;
+            lastIsTarget = false;
+            uint pid;
+            GetWindowThreadProcessId(hwnd, out pid);
+            try
+            {
+                using (var p = Process.GetProcessById((int)pid))
+                    lastIsTarget = string.Equals(p.ProcessName, targetProcess, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception) { } // 그 사이 종료된 프로세스
+        }
+        return lastIsTarget;
+    }
+
+    static void Worker()
+    {
+        foreach (int lv in jobs.GetConsumingEnumerable())
+            ApplySpeed(lv);
+    }
+
+    // 게임 배속 UI를 실제로 조작하는 부분. 배속 UI 스크린샷을 받은 뒤 클릭 위치를 채운다.
+    static void ApplySpeed(int lv)
+    {
+        Log("배속 x" + Fmt(lv));
+    }
+
+    // 화면 좌표 (x, y)를 클릭하고 마우스를 원래 자리로 되돌린다.
+    // Roblox 버튼은 커서가 올라온 걸 먼저 알아야 클릭이 먹어서, 이동 → 1px 흔들기 → 클릭 순서로 보낸다.
+    static void ClickAndReturn(int x, int y)
+    {
+        POINT back;
+        GetCursorPos(out back);
+        MoveTo(x, y); Thread.Sleep(10);
+        MoveTo(x + 1, y); Thread.Sleep(10);
+        MoveTo(x, y);
+        SendMouse(0, 0, MOUSEEVENTF_LEFTDOWN); Thread.Sleep(15);
+        SendMouse(0, 0, MOUSEEVENTF_LEFTUP); Thread.Sleep(10);
+        MoveTo(back.X, back.Y);
+    }
+
+    static void MoveTo(int x, int y)
+    {
+        Rectangle vs = SystemInformation.VirtualScreen;
+        int nx = (int)((x - vs.Left) * 65535.0 / (vs.Width - 1));
+        int ny = (int)((y - vs.Top) * 65535.0 / (vs.Height - 1));
+        SendMouse(nx, ny, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK);
+    }
+
+    static void SendMouse(int dx, int dy, uint flags)
+    {
+        var input = new INPUT { type = INPUT_MOUSE, mi = new MOUSEINPUT { dx = dx, dy = dy, dwFlags = flags } };
+        SendInput(1, new[] { input }, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    static void LoadIni()
+    {
+        string dir = AppDomain.CurrentDomain.BaseDirectory;
+        logPath = Path.Combine(dir, "DjSpeed.log");
+        string ini = Path.Combine(dir, "DjSpeed.ini");
+        if (!File.Exists(ini)) return;
+
+        foreach (string raw in File.ReadAllLines(ini))
+        {
+            string line = raw.Trim();
+            int eq = line.IndexOf('=');
+            if (eq < 0 || line.StartsWith(";") || line.StartsWith("[")) continue;
+            string key = line.Substring(0, eq).Trim();
+            string val = line.Substring(eq + 1).Trim();
+            if (key == "TargetProcess") targetProcess = val;
+            else if (key == "Debug") debug = val == "1";
+        }
+    }
+
+    static void UpdateTray()
+    {
+        tray.Text = "DJ 배속 x" + Fmt(level);
+    }
+
+    static string Fmt(int lv)
+    {
+        return (lv / 10) + "." + (lv % 10);
+    }
+
+    static void Log(string s)
+    {
+        if (!debug) return;
+        File.AppendAllText(logPath, DateTime.Now.ToString("HH:mm:ss.fff") + " " + s + Environment.NewLine);
+    }
+}

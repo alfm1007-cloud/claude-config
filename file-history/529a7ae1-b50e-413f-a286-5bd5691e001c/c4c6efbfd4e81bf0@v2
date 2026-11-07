@@ -1,0 +1,27 @@
+"""테스트용 대상 창: 마우스 누름/뗌(위치 비율)과 키 누름/뗌을 시각과 함께 파일에 기록."""
+import sys
+import time
+import tkinter as tk
+
+out_path = sys.argv[1]
+root = tk.Tk()
+root.title("ClickMacroTestTarget")
+root.geometry("420x320+200+200")
+canvas = tk.Canvas(root, bg="white", highlightthickness=0)
+canvas.pack(fill="both", expand=True)
+
+
+def write(line):
+    with open(out_path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def mouse(kind):
+    return lambda e: write(f"{kind},{time.perf_counter():.3f},{e.x / canvas.winfo_width():.4f},{e.y / canvas.winfo_height():.4f}")
+
+
+canvas.bind("<ButtonPress-1>", mouse("mdown"))
+canvas.bind("<ButtonRelease-1>", mouse("mup"))
+root.bind("<KeyPress>", lambda e: write(f"kdown,{time.perf_counter():.3f},{e.keysym},{e.keycode}"))
+root.bind("<KeyRelease>", lambda e: write(f"kup,{time.perf_counter():.3f},{e.keysym},{e.keycode}"))
+root.mainloop()

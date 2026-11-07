@@ -1,0 +1,6 @@
+' Launches the click macro GUI without a console window. Double-click to run.
+Set fso = CreateObject("Scripting.FileSystemObject")
+folder = fso.GetParentFolderName(WScript.ScriptFullName)
+script = folder & "\click_macro.pyw"
+' pythonw.exe = Python without a console, 0 = hide launcher window
+CreateObject("WScript.Shell").Run "pythonw """ & script & """", 0, False

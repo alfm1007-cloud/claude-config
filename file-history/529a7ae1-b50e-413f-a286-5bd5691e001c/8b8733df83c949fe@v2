@@ -1,0 +1,73 @@
+"""로블록스 실험 공용: 모듈 로드, 대상 창 찾기, 가려진 창도 찍는 화면 캡처."""
+import ctypes
+import importlib.machinery
+import importlib.util
+import os
+from ctypes import wintypes
+
+from PIL import Image
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = r"C:\Users\alfm1\Desktop\Claude\click-macro\click_macro.pyw"
+
+loader = importlib.machinery.SourceFileLoader("click_macro", SRC)
+spec = importlib.util.spec_from_loader("click_macro", loader)
+cm = importlib.util.module_from_spec(spec)
+loader.exec_module(cm)
+u = cm.user32
+gdi = ctypes.WinDLL("gdi32")
+
+H = ctypes.c_void_p
+u.GetDC.restype, u.GetDC.argtypes = H, [wintypes.HWND]
+u.ReleaseDC.argtypes = [wintypes.HWND, H]
+u.PrintWindow.argtypes = [wintypes.HWND, H, wintypes.UINT]
+gdi.CreateCompatibleDC.restype, gdi.CreateCompatibleDC.argtypes = H, [H]
+gdi.CreateCompatibleBitmap.restype, gdi.CreateCompatibleBitmap.argtypes = H, [H, ctypes.c_int, ctypes.c_int]
+gdi.SelectObject.restype, gdi.SelectObject.argtypes = H, [H, H]
+gdi.DeleteObject.argtypes = [H]
+gdi.DeleteDC.argtypes = [H]
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", wintypes.DWORD), ("biWidth", ctypes.c_long), ("biHeight", ctypes.c_long),
+                ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
+
+
+gdi.GetDIBits.argtypes = [H, H, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, ctypes.POINTER(BITMAPINFOHEADER), wintypes.UINT]
+
+
+def roblox_hwnd():
+    w = cm.match_window(cm.list_windows(), "RobloxPlayerBeta.exe", "Roblox")
+    return w[0] if w else None
+
+
+def capture(hwnd, name):
+    """창 안쪽 영역을 캡처해 PNG 저장 (다른 창에 가려져 있어도 됨). (이미지, 경로) 반환."""
+    rect = wintypes.RECT()
+    u.GetClientRect(hwnd, ctypes.byref(rect))
+    w, h = rect.right, rect.bottom
+    hdc = u.GetDC(hwnd)
+    mdc = gdi.CreateCompatibleDC(hdc)
+    bmp = gdi.CreateCompatibleBitmap(hdc, w, h)
+    old = gdi.SelectObject(mdc, bmp)
+    u.PrintWindow(hwnd, mdc, 1 | 2)   # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+    bmi = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+    buf = ctypes.create_string_buffer(w * h * 4)
+    gdi.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bmi), 0)
+    gdi.SelectObject(mdc, old)
+    gdi.DeleteObject(bmp)
+    gdi.DeleteDC(mdc)
+    u.ReleaseDC(hwnd, hdc)
+    img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1).copy()
+    path = os.path.join(HERE, name)
+    img.save(path)
+    return img, path
+
+
+def brightness(img, box=None):
+    """영역 평균 밝기(0~255). 메뉴가 열리면 화면이 어두워지는 것을 수치로 보기 위함."""
+    g = (img.crop(box) if box else img).convert("L")
+    data = g.tobytes()
+    return sum(data) / len(data)

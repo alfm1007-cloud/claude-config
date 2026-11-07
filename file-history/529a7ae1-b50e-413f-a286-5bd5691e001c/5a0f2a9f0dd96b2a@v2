@@ -1,0 +1,107 @@
+"""click_macro.pyw 핵심 함수 검증: 창 찾기 / 백그라운드 창 클릭 / 최소화 창 클릭 / 원상복귀."""
+import ctypes
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+import time
+from ctypes import wintypes
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = r"C:\Users\alfm1\Desktop\Claude\click-macro\click_macro.pyw"
+OUT = os.path.join(HERE, "clicks.txt")
+
+loader = importlib.machinery.SourceFileLoader("click_macro", SRC)
+spec = importlib.util.spec_from_loader("click_macro", loader)
+cm = importlib.util.module_from_spec(spec)
+loader.exec_module(cm)
+u = cm.user32
+
+
+def cursor():
+    p = wintypes.POINT()
+    u.GetCursorPos(ctypes.byref(p))
+    return p.x, p.y
+
+
+def clicks():
+    if not os.path.exists(OUT):
+        return []
+    with open(OUT, encoding="utf-8") as f:
+        return [tuple(float(v) for v in line.split(",")) for line in f if line.strip()]
+
+
+results = []
+
+
+def check(name, cond, detail=""):
+    results.append(cond)
+    print(f"[{'PASS' if cond else 'FAIL'}] {name} {detail}")
+
+
+if os.path.exists(OUT):
+    os.remove(OUT)
+
+fg0 = u.GetForegroundWindow()
+wins = cm.list_windows()
+print(f"창 목록 {len(wins)}개")
+rb = cm.match_window(wins, "RobloxPlayerBeta.exe", "Roblox")
+check("로블록스 창 탐지", rb is not None, f"-> {rb[1:] if rb else None}")
+
+proc = subprocess.Popen([sys.executable, os.path.join(HERE, "test_target.py"), OUT])
+try:
+    target = None
+    for _ in range(50):
+        time.sleep(0.1)
+        target = cm.match_window(cm.list_windows(), os.path.basename(sys.executable), "ClickMacroTestTarget")
+        if target:
+            break
+    check("테스트 대상 창 탐지", target is not None)
+    hwnd = target[0]
+    time.sleep(0.5)
+
+    # 대상 창이 맨 앞이 아닌 상태를 만든다 (원래 쓰던 창을 다시 앞으로)
+    if fg0 and u.GetForegroundWindow() != fg0:
+        check("_activate: 원래 창 앞으로", cm._activate(fg0))
+    time.sleep(0.2)
+
+    # 1) 백그라운드 창 클릭
+    fg_before, cur_before = u.GetForegroundWindow(), cursor()
+    check("사전조건: 대상 창이 맨 앞이 아님", fg_before != hwnd)
+    ok, msg = cm.click_in_window(hwnd, 0.25, 0.75)
+    time.sleep(0.4)
+    got = clicks()
+    check("1) click_in_window 반환", ok, msg)
+    check("1) 클릭 1건 수신", len(got) == 1, str(got))
+    if got:
+        check("1) 위치 일치 (0.25, 0.75 ±0.02)", abs(got[-1][0] - 0.25) < 0.02 and abs(got[-1][1] - 0.75) < 0.02, str(got[-1]))
+    check("1) 맨 앞 창 복귀", u.GetForegroundWindow() == fg_before)
+    check("1) 마우스 위치 복귀", cursor() == cur_before, f"{cur_before} -> {cursor()}")
+
+    # 2) 최소화된 창 클릭
+    u.ShowWindow(hwnd, cm.SW_MINIMIZE)
+    time.sleep(0.5)
+    if fg0 and u.GetForegroundWindow() != fg0:
+        cm._activate(fg0)
+        time.sleep(0.2)
+    fg_before, cur_before = u.GetForegroundWindow(), cursor()
+    check("사전조건: 대상 창 최소화됨", bool(u.IsIconic(hwnd)))
+    ok, msg = cm.click_in_window(hwnd, 0.6, 0.4)
+    time.sleep(0.5)
+    got = clicks()
+    check("2) click_in_window 반환", ok, msg)
+    check("2) 클릭 누적 2건", len(got) == 2, str(got))
+    if len(got) == 2:
+        check("2) 위치 일치 (0.6, 0.4 ±0.02)", abs(got[-1][0] - 0.6) < 0.02 and abs(got[-1][1] - 0.4) < 0.02, str(got[-1]))
+    check("2) 다시 최소화됨", bool(u.IsIconic(hwnd)))
+    check("2) 맨 앞 창 복귀", u.GetForegroundWindow() == fg_before)
+    check("2) 마우스 위치 복귀", cursor() == cur_before, f"{cur_before} -> {cursor()}")
+
+    # 3) 창 밖 좌표는 위치 지정에서 거부되는지 (최소화 상태 = 안쪽 영역 0)
+    check("3) 최소화 상태에서 cursor_ratio_in = None", cm.cursor_ratio_in(hwnd) is None)
+finally:
+    proc.kill()
+
+print(f"\n결과: {sum(results)}/{len(results)} PASS")
+sys.exit(0 if all(results) else 1)

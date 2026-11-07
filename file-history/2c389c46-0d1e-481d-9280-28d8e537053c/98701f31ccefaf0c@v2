@@ -1,0 +1,172 @@
+$ErrorActionPreference = 'Stop'
+$dir = 'C:\Users\alfm1\Desktop\Claude\halligalli-bell'
+$ini = Join-Path $dir 'HalliBell.ini'
+$log = Join-Path $dir 'HalliBell.log'
+
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows.Forms;
+
+public static class KeyHarness
+{
+    [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)] struct U { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public U u; }
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] i, int size);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint type);
+    [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int v);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc fn, IntPtr l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, StringBuilder l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+
+    static Stopwatch sw = Stopwatch.StartNew();
+    static void Wait(int ms) { long end = sw.ElapsedMilliseconds + ms; while (sw.ElapsedMilliseconds < end) Application.DoEvents(); }
+    static void Key(Keys k, bool up)
+    {
+        var i = new INPUT { type = 1 };
+        i.u.ki.wVk = (ushort)k; i.u.ki.wScan = (ushort)MapVirtualKey((uint)k, 0); i.u.ki.dwFlags = up ? 2u : 0u;
+        SendInput(1, new[] { i }, Marshal.SizeOf(typeof(INPUT)));
+    }
+    static void Tap(Keys k) { Key(k, false); Wait(30); Key(k, true); }
+    static void ClickAt(Point p)
+    {
+        long l = GetSystemMetrics(76), t = GetSystemMetrics(77), w = GetSystemMetrics(78), h = GetSystemMetrics(79);
+        var a = new INPUT[2];
+        for (int n = 0; n < 2; n++)
+        {
+            a[n].type = 0;
+            a[n].u.mi.dx = (int)(((p.X - l) * 65536 + w - 1) / w);
+            a[n].u.mi.dy = (int)(((p.Y - t) * 65536 + h - 1) / h);
+            a[n].u.mi.dwFlags = 0x0001u | 0x8000u | 0x4000u | (n == 0 ? 0x0002u : 0x0004u);
+        }
+        SendInput(2, a, Marshal.SizeOf(typeof(INPUT)));
+    }
+    static string Text(IntPtr h) { var sb = new StringBuilder(512); SendMessage(h, 0x000D, (IntPtr)512, sb); return sb.ToString(); }
+    static string Cls(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
+    static IntPtr Child(IntPtr parent, string clsPart, Func<string, bool> match)
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumChildWindows(parent, (h, l) => { if (Cls(h).Contains(clsPart) && match(Text(h))) { found = h; return false; } return true; }, IntPtr.Zero);
+        return found;
+    }
+    static void ClickWnd(IntPtr h) { RECT r; GetWindowRect(h, out r); ClickAt(new Point((r.Left + r.Right) / 2, (r.Top + r.Bottom) / 2)); }
+    static string IniVal(string path, string key)
+    {
+        foreach (string l in File.ReadAllLines(path, Encoding.UTF8)) if (l.StartsWith(key + "=")) return l.Substring(key.Length + 1);
+        return "(없음)";
+    }
+
+    public static string Run(string iniPath)
+    {
+        try { SetProcessDpiAwareness(2); } catch (Exception) { }
+        var log = new StringBuilder();
+        POINT uc; GetCursorPos(out uc);
+
+        // ===== A. 키 설정 창 (/keys로 열림) =====
+        IntPtr dlg = IntPtr.Zero;
+        for (int n = 0; n < 30 && dlg == IntPtr.Zero; n++) { dlg = FindWindow(null, "할리갈리 단축키 설정"); Wait(100); }
+        log.AppendLine("[설정 창] 열림: " + (dlg != IntPtr.Zero));
+        if (dlg == IntPtr.Zero) return log.ToString();
+        Func<string> status = () => { IntPtr s = Child(dlg, "STATIC", t => t.Contains("요") || t.Contains("누르세요")); return s == IntPtr.Zero ? "" : Text(s); };
+
+        IntPtr bBell = Child(dlg, "BUTTON", t => t == "S");
+        IntPtr bCard = Child(dlg, "BUTTON", t => t == "F");
+        IntPtr bTog = Child(dlg, "BUTTON", t => t == "F8");
+        log.AppendLine("[설정 창] 버튼 찾음: 종=" + (bBell != IntPtr.Zero) + " 카드=" + (bCard != IntPtr.Zero) + " 켜기끄기=" + (bTog != IntPtr.Zero));
+
+        ClickWnd(bBell); Wait(250);
+        string waiting = Text(bBell);
+        Tap(Keys.G); Wait(400);
+        log.AppendLine("[종 치기 S→G] 대기 표시='" + waiting + "' → 버튼='" + Text(bBell) + "' ini BellKey=" + IniVal(iniPath, "BellKey") + " (기대 G)");
+
+        ClickWnd(bCard); Wait(250); Tap(Keys.G); Wait(400);
+        log.AppendLine("[카드 ← G 중복] 버튼='" + Text(bCard) + "' ini CardKey=" + IniVal(iniPath, "CardKey") + " 안내='" + status() + "' (기대 F 유지)");
+
+        ClickWnd(bCard); Wait(250); Tap(Keys.Escape); Wait(400);
+        log.AppendLine("[카드 Esc 취소] 버튼='" + Text(bCard) + "' ini CardKey=" + IniVal(iniPath, "CardKey") + " 안내='" + status() + "' (기대 F 유지)");
+
+        ClickWnd(bTog); Wait(250); Tap(Keys.F7); Wait(400);
+        log.AppendLine("[켜기/끄기 ← F7 중복] 버튼='" + Text(bTog) + "' ini ToggleKey=" + IniVal(iniPath, "ToggleKey") + " (기대 F8 유지)");
+        ClickWnd(bTog); Wait(250); Tap(Keys.F9); Wait(400);
+        log.AppendLine("[켜기/끄기 ← F9] 버튼='" + Text(bTog) + "' ini ToggleKey=" + IniVal(iniPath, "ToggleKey") + " (기대 F9)");
+
+        ClickWnd(bCard); Wait(250); Tap(Keys.D1); Wait(400);
+        log.AppendLine("[카드 ← 숫자 1] 버튼='" + Text(bCard) + "' ini CardKey=" + IniVal(iniPath, "CardKey") + " (기대 버튼 1, ini D1)");
+
+        ClickWnd(Child(dlg, "BUTTON", t => t == "닫기")); Wait(400);
+        log.AppendLine("[닫기] 창 닫힘: " + !IsWindow(dlg));
+
+        // ===== B. 다시 켜지 않고 새 키(G·1·F9)가 바로 동작하는지 =====
+        var f = new Form { Text = "HalliBell 자동 테스트", TopMost = true, KeyPreview = true,
+                           StartPosition = FormStartPosition.Manual, Location = new Point(200, 200), ClientSize = new Size(520, 260) };
+        var bellBtn = new Button { Text = "BELL", Location = new Point(20, 20), Size = new Size(140, 90), TabStop = false };
+        var cardBtn = new Button { Text = "CARD", Location = new Point(20, 140), Size = new Size(140, 90), TabStop = false };
+        var note = new Label { Text = "자동 테스트 중\r\n손 떼 주세요", Location = new Point(200, 110), AutoSize = true,
+                               Font = new Font("Malgun Gothic", 14, FontStyle.Bold), ForeColor = Color.Firebrick };
+        f.Controls.Add(bellBtn); f.Controls.Add(cardBtn); f.Controls.Add(note);
+        int bells = 0, cards = 0; var toApp = new List<Keys>();
+        bellBtn.MouseDown += delegate { bells++; };
+        cardBtn.MouseDown += delegate { cards++; };
+        f.KeyDown += delegate (object s, KeyEventArgs e) { toApp.Add(e.KeyCode); };
+        f.Show(); Wait(500);
+        ClickAt(f.PointToScreen(new Point(450, 230))); Wait(300);
+        Point bell = bellBtn.PointToScreen(new Point(70, 45)), card = cardBtn.PointToScreen(new Point(70, 45)), rest = f.PointToScreen(new Point(420, 60));
+        SetCursorPos(bell.X, bell.Y); Wait(50); Tap(Keys.F7); Wait(400);
+        SetCursorPos(card.X, card.Y); Wait(50); Tap(Keys.F6); Wait(400);
+
+        Func<Keys, string> press = k =>
+        {
+            SetCursorPos(rest.X, rest.Y); Wait(40);
+            int b0 = bells, c0 = cards, a0 = toApp.Count;
+            Tap(k); Wait(200);
+            return "종 " + (bells - b0) + " 카드 " + (cards - c0) + " 앱에 간 키 " + (toApp.Count - a0);
+        };
+        log.AppendLine("[새 키 G]  " + press(Keys.G) + "  (기대 종 1 카드 0 앱 0)");
+        log.AppendLine("[새 키 1]  " + press(Keys.D1) + "  (기대 종 0 카드 1 앱 0)");
+        log.AppendLine("[옛 키 S]  " + press(Keys.S) + "  (기대 종 0 카드 0 앱 1 — 더 이상 안 막음)");
+        log.AppendLine("[옛 키 F]  " + press(Keys.F) + "  (기대 종 0 카드 0 앱 1)");
+        Tap(Keys.F9); Wait(250);
+        log.AppendLine("[F9 끈 뒤 G] " + press(Keys.G) + "  (기대 종 0 카드 0 앱 1)");
+        Tap(Keys.F9); Wait(250);
+        log.AppendLine("[F9 켠 뒤 G] " + press(Keys.G) + "  (기대 종 1 카드 0 앱 0)");
+        f.Close();
+        SetCursorPos(uc.X, uc.Y);
+        return log.ToString();
+    }
+}
+'@
+
+if (Get-Process HalliBell -ErrorAction SilentlyContinue) { throw "HalliBell이 이미 실행 중 — 사용자 설정 보호를 위해 테스트 중단" }
+$backup = "$ini.test_backup"
+$hadIni = Test-Path $ini
+if ($hadIni) { Copy-Item $ini $backup -Force }
+$hadLog = Test-Path $log
+if ($hadLog) { Copy-Item $log "$log.test_backup" -Force }
+Remove-Item $ini, $log -ErrorAction SilentlyContinue
+$p = Start-Process (Join-Path $dir 'HalliBell.exe') -ArgumentList '/keys' -PassThru
+Start-Sleep -Milliseconds 1000
+try {
+    [KeyHarness]::Run($ini)
+} finally {
+    Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+    Remove-Item $ini, $log -ErrorAction SilentlyContinue
+    if ($hadIni) { Move-Item $backup $ini -Force }
+    if ($hadLog) { Move-Item "$log.test_backup" $log -Force }
+}

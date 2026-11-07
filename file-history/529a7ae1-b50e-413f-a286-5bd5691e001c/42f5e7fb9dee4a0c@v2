@@ -1,0 +1,122 @@
+"""마우스가 움직이는 중에도 정확한 지점이 눌리는 입력 방식 찾기 (좌표 기록용 테스트 창 대상).
+separate: [이동, 누름]을 한 번의 SendInput 묶음으로 / combined: 이동+누름을 입력 1건에 합침"""
+import ctypes
+import os
+import random
+import subprocess
+import sys
+import threading
+import time
+from ctypes import wintypes
+
+from rbx_lib import HERE, cm, u
+
+OUT = os.path.join(HERE, "clicks_atomic.txt")
+W_, H_ = 420, 320
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("mi", MOUSEINPUT)]
+
+
+u.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+u.GetSystemMetrics.argtypes = [ctypes.c_int]
+SL, ST, SW, SH = (u.GetSystemMetrics(i) for i in (76, 77, 78, 79))
+ABS = 0x0001 | 0x8000 | 0x4000
+DOWN, UP = 0x0002, 0x0004
+
+
+def mi(x, y, flags):
+    return INPUT(0, MOUSEINPUT(((x - SL) * 65536 + SW - 1) // SW, ((y - ST) * 65536 + SH - 1) // SH, 0, flags, 0, 0))
+
+
+def send(*inputs):
+    arr = (INPUT * len(inputs))(*inputs)
+    u.SendInput(len(inputs), arr, ctypes.sizeof(INPUT))
+
+
+def click(x, y, variant):
+    if variant == "separate":
+        send(mi(x + 1, y, ABS), mi(x, y, ABS))
+        time.sleep(0.03)
+        send(mi(x, y, ABS), INPUT(0, MOUSEINPUT(0, 0, 0, DOWN, 0, 0)))
+        time.sleep(0.06)
+        send(mi(x, y, ABS), INPUT(0, MOUSEINPUT(0, 0, 0, UP, 0, 0)))
+    else:
+        send(mi(x + 1, y, ABS), mi(x, y, ABS))
+        time.sleep(0.03)
+        send(mi(x, y, ABS | DOWN))
+        time.sleep(0.06)
+        send(mi(x, y, ABS | UP))
+    time.sleep(0.05)
+
+
+def read_clicks():
+    if not os.path.exists(OUT):
+        return []
+    with open(OUT, encoding="utf-8") as f:
+        return [tuple(round(float(v) * n) for v, n in zip(line.split(","), (W_, H_))) for line in f if line.strip()]
+
+
+if os.path.exists(OUT):
+    os.remove(OUT)
+orig_fg = u.GetForegroundWindow()
+prev = wintypes.POINT()
+u.GetCursorPos(ctypes.byref(prev))
+target = subprocess.Popen([sys.executable, os.path.join(HERE, "test_target.py"), OUT])
+stop = threading.Event()
+shaking = threading.Event()
+
+
+def shaker():
+    i = 0
+    while not stop.is_set():
+        if shaking.is_set():
+            u.mouse_event(cm.MOUSEEVENTF_MOVE, 5 if (i // 40) % 2 == 0 else -5, 3 if (i // 25) % 2 == 0 else -3, 0, 0)
+            i += 1
+        time.sleep(0.004)
+
+
+threading.Thread(target=shaker, daemon=True).start()
+try:
+    win = None
+    for _ in range(60):
+        time.sleep(0.1)
+        win = cm.match_window(cm.list_windows(), os.path.basename(sys.executable), "ClickMacroTestTarget")
+        if win:
+            break
+    hwnd = win[0]
+    time.sleep(0.5)
+    cm._activate(hwnd)
+    time.sleep(0.3)
+    random.seed(7)
+    for variant in ("separate", "combined"):
+        for shake in (False, True):
+            shaking.set() if shake else shaking.clear()
+            time.sleep(0.1)
+            before = len(read_clicks())
+            want = []
+            for _ in range(12):
+                cx, cy = random.randrange(40, W_ - 40), random.randrange(40, H_ - 40)
+                pt = wintypes.POINT(cx, cy)
+                u.ClientToScreen(hwnd, ctypes.byref(pt))
+                click(pt.x, pt.y, variant)
+                want.append((cx, cy))
+            shaking.clear()
+            time.sleep(0.4)
+            got = read_clicks()[before:]
+            errs = [(g[0] - w[0], g[1] - w[1]) for g, w in zip(got, want)]
+            exact = sum(1 for e in errs if e == (0, 0))
+            print(f"{variant:9} | 마우스 흔들기 {str(shake):5} | 받은 클릭 {len(got)}/12 | 정확 {exact} | 오차 {sorted(set(errs))}")
+finally:
+    stop.set()
+    target.kill()
+    u.SetCursorPos(prev.x, prev.y)
+    time.sleep(0.2)
+    if orig_fg:
+        cm._activate(orig_fg)

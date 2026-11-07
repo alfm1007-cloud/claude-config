@@ -1,0 +1,40 @@
+# Shared helpers for in-game DjSpeed tests (dot-source this file).
+Add-Type -AssemblyName System.Drawing, System.Windows.Forms
+if (-not ("R" -as [type])) {
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public static class R {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+}
+"@
+}
+[R]::SetProcessDPIAware() | Out-Null
+
+function Get-RobloxHwnd { (Get-Process RobloxPlayerBeta -ErrorAction Stop | Select-Object -First 1).MainWindowHandle }
+
+function Focus-Roblox {
+  $h = Get-RobloxHwnd
+  if ([R]::GetForegroundWindow() -eq $h) { return $true }
+  [R]::SetForegroundWindow($h) | Out-Null
+  Start-Sleep -Milliseconds 300
+  if ([R]::GetForegroundWindow() -ne $h) {
+    # foreground lock: a fake Alt tap lets SetForegroundWindow through
+    [R]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero); [R]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+    [R]::SetForegroundWindow($h) | Out-Null
+    Start-Sleep -Milliseconds 300
+  }
+  return ([R]::GetForegroundWindow() -eq $h)
+}
+
+function Grab($x, $y, $w, $hgt) {
+  $bmp = New-Object System.Drawing.Bitmap $w, $hgt
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.CopyFromScreen($x, $y, 0, 0, $bmp.Size); $g.Dispose()
+  return $bmp
+}
+
+function Is-Bluish($c) { return ($c.B -ge 170 -and $c.B -gt $c.R + 40 -and $c.B -gt $c.G + 30) }

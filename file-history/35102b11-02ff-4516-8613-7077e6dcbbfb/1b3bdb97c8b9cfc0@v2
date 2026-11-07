@@ -1,0 +1,50 @@
+param([string]$OutFile)
+# Test window at screen (0,0) large enough to receive DjSpeed's clicks.
+# Records which keys arrive, where clicks land (client coords), and whether the cursor returns.
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public static class W {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+}
+"@
+[W]::SetProcessDPIAware() | Out-Null
+$keys = New-Object System.Collections.Generic.List[string]
+$clicks = New-Object System.Collections.Generic.List[string]
+$state = @{ step = 0; result = "TIMEOUT"; before = ""; after = "" }
+$f = New-Object System.Windows.Forms.Form
+$f.Text = "DjSpeed test"; $f.TopMost = $true; $f.FormBorderStyle = 'FixedSingle'
+$f.StartPosition = 'Manual'; $f.Location = New-Object System.Drawing.Point 0, 0
+$f.ClientSize = New-Object System.Drawing.Size 450, 650
+$f.Add_KeyDown({ param($s, $e) $keys.Add($e.KeyData.ToString()); $e.SuppressKeyPress = $true })
+$f.Add_KeyUp({ param($s, $e) $e.Handled = $true })
+$f.Add_MouseDown({ param($s, $e) $clicks.Add("$($e.X),$($e.Y)") })
+$t = New-Object System.Windows.Forms.Timer; $t.Interval = 400
+$t.Add_Tick({
+  $t.Stop()
+  if ($state.step -eq 0) {
+    [W]::SetForegroundWindow($f.Handle) | Out-Null
+    if ([W]::GetForegroundWindow() -ne $f.Handle) { $state.result = "NOT_FOREGROUND"; $f.Close(); return }
+    $state.before = [System.Windows.Forms.Cursor]::Position.ToString()
+    [System.Windows.Forms.SendKeys]::SendWait("{F6}{F12}{F10}{ADD}{SUBTRACT}{F11}")
+    $state.step = 1; $t.Interval = 1500; $t.Start()   # wait for DjSpeed's clicks to land
+  } elseif ($state.step -eq 1) {
+    $state.after = [System.Windows.Forms.Cursor]::Position.ToString()
+    [W]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)   # Alt down
+    [W]::keybd_event(0x73, 0, 0, [UIntPtr]::Zero)   # F4 down
+    [W]::keybd_event(0x73, 0, 2, [UIntPtr]::Zero)   # F4 up
+    [W]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)   # Alt up
+    $state.step = 2; $t.Interval = 400; $t.Start()
+  } else { $state.result = "OK"; $f.Close() }
+})
+$f.Add_Shown({ $f.Activate(); $t.Start() })
+[System.Windows.Forms.Application]::Run($f)
+@(
+  "result: " + $state.result,
+  "keys:   " + ($keys -join " | "),
+  "clicks: " + ($clicks -join " | "),
+  "cursor before: " + $state.before + "  after: " + $state.after
+) | Set-Content $OutFile

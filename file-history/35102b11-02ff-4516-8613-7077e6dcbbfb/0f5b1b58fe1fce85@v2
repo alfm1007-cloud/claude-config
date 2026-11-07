@@ -1,0 +1,12 @@
+﻿; Roblox DJ 배속 단축키 설정
+[General]
+; 단축키가 동작할 프로그램 이름 (작업 관리자 > 세부 정보의 이름에서 .exe를 뺀 것)
+TargetProcess=RobloxPlayerBeta
+; 1로 바꾸면 누른 키와 클릭 위치를 DjSpeed.log에 기록 (문제 확인용)
+Debug=0
+; 클릭 단계 사이 대기(ms)
+ClickDelay=20
+
+[Position]
+; 클릭 위치 (Roblox 창 안쪽 기준 픽셀). 트레이 메뉴의 [위치 설정]을 마치면 아래에 자동으로 저장됩니다.
+; 아직 비어 있으면 처음 켤 때 위치 설정이 자동으로 시작됩니다.

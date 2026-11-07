@@ -1,0 +1,545 @@
+// Roblox DJ 배속 단축키 (미드나잇 플라자 애니메이션 패널의 "속도" 슬라이더용)
+// F1~F10 = x0.1~x1.0, F12·T = x0 (슬라이더의 해당 자리 클릭), F11 = 막기만
+// 텐키 + / -, E / Q = 게임의 + / - 버튼 클릭
+// Roblox 창이 앞에 있을 때만 동작하고, 그동안 이 키들은 게임에 전달하지 않는다.
+// 예외: Alt+F4, 그리고 채팅 입력 중의 Q/E/T(글자로 보낸다).
+// 클릭 위치는 트레이 메뉴의 "위치 설정"으로 잡는다. 설정 파일에 창 크기가 없으면 처음 켤 때 자동으로 시작한다.
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
+
+static class DjSpeed
+{
+    const int WH_KEYBOARD_LL = 13, WH_MOUSE_LL = 14;
+    const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104, WM_LBUTTONDOWN = 0x0201;
+    const uint LLKHF_ALTDOWN = 0x20;
+    const uint VK_F1 = 0x70, VK_F4 = 0x73, VK_F10 = 0x79, VK_F12 = 0x7B, VK_ADD = 0x6B, VK_SUBTRACT = 0x6D;
+    const uint VK_Q = 0x51, VK_E = 0x45, VK_T = 0x54;
+    const uint VK_SLASH = 0xBF, VK_RETURN = 0x0D, VK_ESCAPE = 0x1B, VK_SPACE = 0x20;
+    const uint INPUT_MOUSE = 0;
+    const uint MOUSEEVENTF_MOVE = 0x0001, MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004;
+    const uint GA_ROOT = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct KBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct MSLLHOOKSTRUCT { public POINT pt; public uint mouseData, flags, time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT { public uint type; public MOUSEINPUT mi; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINT { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct RECT { public int Left, Top, Right, Bottom; }
+
+    delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int idHook, HookProc fn, IntPtr hMod, uint threadId);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
+    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr hWnd, ref POINT p);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+
+    // 훅이 도는 동안 GC에 수거되지 않게 붙잡아 둔다
+    static readonly HookProc keyProc = KeyCallback, mouseProc = MouseCallback;
+    static IntPtr keyHook, mouseHook;
+    static string targetProcess = "RobloxPlayerBeta";
+    static bool debug;
+    static string iniPath, logPath;
+    static bool needsSetup; // 설정 파일에 창 크기가 없다 = 이 PC에서 위치 설정을 한 적이 없다
+
+    // 클릭 위치: Roblox 창 안쪽(제목 표시줄 아래) 기준 픽셀. 기본값은 2560x1440 모니터, 창 최대화 기준.
+    static int sliderLeft = 127, sliderRight = 326, sliderY = 550;
+    static Point minusButton = new Point(93, 551), plusButton = new Point(361, 551);
+    static Rectangle chatBox = Rectangle.FromLTRB(27, 434, 740, 500); // 채팅 입력칸 (오른쪽 보내기 버튼 제외)
+    static int windowWidth = 2560, windowHeight = 1369; // 위치를 잡을 때의 Roblox 창 안쪽 크기
+    static int clickDelay = 20; // 클릭 단계(이동 → 누름 → 뗌 → 복귀) 사이 대기(ms)
+
+    static int level = 10; // 트레이 표시용 배속(0.1 단위, 0~10). 시작은 x1.0으로 가정
+    static bool chatMode; // Roblox 채팅에 글을 쓰는 중인지 (추정)
+    static readonly HashSet<uint> held = new HashSet<uint>(); // 꾹 누를 때 들어오는 반복 입력 무시용
+    static readonly BlockingCollection<Action> jobs = new BlockingCollection<Action>();
+    static IntPtr lastHwnd;
+    static bool lastIsTarget;
+    static int lastSizeWarn = -100000;
+    static NotifyIcon tray;
+
+    // 위치 설정 모드: 안내창을 띄우고, 마우스를 올린 뒤 Space를 누를 때마다 한 지점씩 기록한다
+    static readonly string[] calSteps =
+    {
+        "속도 막대의 왼쪽 끝 (0 자리)",
+        "속도 막대의 오른쪽 끝 (1.0 자리)",
+        "- 버튼 가운데",
+        "+ 버튼 가운데",
+        "채팅 입력칸의 왼쪽 위 모서리",
+        "채팅 입력칸의 오른쪽 아래 모서리 (보내기 버튼 바로 왼쪽)"
+    };
+    static bool calibrating;
+    static readonly List<Point> calPoints = new List<Point>();
+    static IntPtr calHwnd;
+    static string calNote = "";
+    static GuideForm guide;
+    static System.Windows.Forms.Timer guideTimer;
+
+    [STAThread]
+    static void Main()
+    {
+        bool created;
+        using (new Mutex(true, "RobloxDjSpeed", out created))
+        {
+            if (!created) { MessageBox.Show("이미 실행 중입니다.", "DJ 배속"); return; }
+
+            SetProcessDPIAware();
+            LoadIni();
+
+            tray = new NotifyIcon { Icon = SystemIcons.Application, Visible = true };
+            var menu = new ContextMenuStrip();
+            menu.Items.Add("위치 설정", null, delegate { StartCalibration(); });
+            menu.Items.Add("종료", null, delegate { Application.Exit(); });
+            tray.ContextMenuStrip = menu;
+            UpdateTray();
+
+            new Thread(Worker) { IsBackground = true }.Start();
+
+            IntPtr module = GetModuleHandle(null);
+            keyHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyProc, module, 0);
+            mouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseProc, module, 0);
+            if (keyHook == IntPtr.Zero || mouseHook == IntPtr.Zero)
+            {
+                tray.Visible = false;
+                MessageBox.Show("키보드·마우스 감지를 시작하지 못했습니다. (오류 " + Marshal.GetLastWin32Error() + ")", "DJ 배속");
+                return;
+            }
+            Log("시작 (대상: " + targetProcess + ")");
+            if (needsSetup) StartCalibration();
+
+            Application.Run();
+
+            UnhookWindowsHookEx(keyHook);
+            UnhookWindowsHookEx(mouseHook);
+            tray.Visible = false;
+        }
+    }
+
+    static IntPtr KeyCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            var kb = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
+            uint vk = kb.vkCode;
+            int msg = wParam.ToInt32();
+            bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            if (!down) held.Remove(vk); // 다른 창으로 넘어간 뒤에 뗀 키도 풀어 준다
+
+            // 위치 설정 중의 Space·Esc는 어느 창이 앞에 있든 가로챈다 (트레이 메뉴로 시작하면 Roblox가 뒤에 있다)
+            if (calibrating && (vk == VK_SPACE || vk == VK_ESCAPE))
+            {
+                if (down && held.Add(vk))
+                {
+                    if (vk == VK_SPACE) CaptureCalPoint();
+                    else EndCalibration("위치 설정을 취소했어요. 이전 위치를 그대로 씁니다.");
+                }
+                return (IntPtr)1;
+            }
+
+            if (IsTargetForeground())
+            {
+                if (down) TrackChat(vk);
+                if (IsHotkey(vk, kb.flags))
+                {
+                    if (down && held.Add(vk)) OnKey(vk);
+                    return (IntPtr)1; // 게임에 전달하지 않음
+                }
+            }
+        }
+        return CallNextHookEx(keyHook, nCode, wParam, lParam);
+    }
+
+    // 채팅칸을 클릭하면 채팅 입력 중, 다른 곳을 클릭하면 끝난 것으로 본다
+    static IntPtr MouseCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0 && wParam.ToInt32() == WM_LBUTTONDOWN && IsTargetForeground())
+        {
+            var ms = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+            POINT p = ms.pt;
+            ScreenToClient(lastHwnd, ref p);
+            SetChatMode(chatBox.Contains(p.X, p.Y));
+        }
+        return CallNextHookEx(mouseHook, nCode, wParam, lParam);
+    }
+
+    // Roblox 채팅은 / 로 열리고 Enter(보내기)·Esc(취소)로 닫힌다
+    static void TrackChat(uint vk)
+    {
+        if (vk == VK_SLASH) SetChatMode(true);
+        else if (vk == VK_RETURN || vk == VK_ESCAPE) SetChatMode(false);
+    }
+
+    static void SetChatMode(bool on)
+    {
+        if (chatMode == on) return;
+        chatMode = on;
+        Log(on ? "채팅 입력 시작 (Q/E/T 풀림)" : "채팅 입력 끝 (Q/E/T 단축키)");
+    }
+
+    static bool IsHotkey(uint vk, uint flags)
+    {
+        if (vk == VK_F4 && (flags & LLKHF_ALTDOWN) != 0) return false; // Alt+F4(창 닫기)는 살린다
+        if ((vk >= VK_F1 && vk <= VK_F12) || vk == VK_ADD || vk == VK_SUBTRACT) return true;
+        return !chatMode && (vk == VK_Q || vk == VK_E || vk == VK_T);
+    }
+
+    // 클릭은 작업 스레드에서 한다. 훅은 바로 돌려줘야 Windows가 끊지 않는다.
+    static void OnKey(uint vk)
+    {
+        IntPtr hwnd = lastHwnd; // 방금 IsTargetForeground가 확인한 Roblox 창
+        if (calibrating || !SizeMatches(hwnd)) return; // 위치 설정 중이거나 창 크기가 다르면 클릭하지 않는다
+        if ((vk >= VK_F1 && vk <= VK_F10) || vk == VK_F12 || vk == VK_T)
+        {
+            int lv = (vk == VK_F12 || vk == VK_T) ? 0 : (int)(vk - VK_F1) + 1;
+            level = lv;
+            jobs.Add(delegate { ClickSlider(hwnd, lv); });
+        }
+        else if (vk == VK_ADD || vk == VK_SUBTRACT || vk == VK_E || vk == VK_Q)
+        {
+            // 게임 버튼을 직접 누르므로, 마우스로 배속을 바꿨더라도 실제 값에서 한 단계씩 움직인다
+            bool up = vk == VK_ADD || vk == VK_E;
+            level = up ? Math.Min(level + 1, 10) : Math.Max(level - 1, 0);
+            jobs.Add(delegate { ClickClient(hwnd, up ? plusButton : minusButton, up ? "+ 버튼" : "- 버튼"); });
+        }
+        else return; // F11: 막기만 한다
+        UpdateTray();
+    }
+
+    // 위치를 잡을 때와 Roblox 창 크기가 다르면 클릭이 엉뚱한 곳에 떨어지므로 누르지 않고 알린다
+    static bool SizeMatches(IntPtr hwnd)
+    {
+        RECT r;
+        GetClientRect(hwnd, out r);
+        if (r.Right == windowWidth && r.Bottom == windowHeight) return true;
+        Log("창 크기 다름: 지금 " + r.Right + "x" + r.Bottom + ", 위치 설정 " + windowWidth + "x" + windowHeight);
+        if (Environment.TickCount - lastSizeWarn > 5000)
+        {
+            lastSizeWarn = Environment.TickCount;
+            tray.ShowBalloonTip(5000, "DJ 배속",
+                "Roblox 창 크기가 위치 설정 때와 달라서 누르지 않았어요. (지금 " + r.Right + "x" + r.Bottom +
+                ", 설정 " + windowWidth + "x" + windowHeight + ")\n창을 최대화하거나, 트레이 메뉴의 [위치 설정]을 다시 해 주세요.",
+                ToolTipIcon.Warning);
+        }
+        return false;
+    }
+
+    static bool IsTargetForeground()
+    {
+        IntPtr hwnd = GetForegroundWindow();
+        if (hwnd != lastHwnd)
+        {
+            lastHwnd = hwnd;
+            lastIsTarget = IsTargetWindow(hwnd);
+        }
+        return lastIsTarget;
+    }
+
+    static bool IsTargetWindow(IntPtr hwnd)
+    {
+        uint pid;
+        GetWindowThreadProcessId(hwnd, out pid);
+        try
+        {
+            using (var p = Process.GetProcessById((int)pid))
+                return string.Equals(p.ProcessName, targetProcess, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception) { return false; } // 그 사이 종료된 프로세스
+    }
+
+    static void StartCalibration()
+    {
+        calibrating = true;
+        calPoints.Clear();
+        calHwnd = IntPtr.Zero;
+        calNote = "";
+        if (guide == null)
+        {
+            guide = new GuideForm();
+            guideTimer = new System.Windows.Forms.Timer { Interval = 100 };
+            guideTimer.Tick += delegate { UpdateGuide(); };
+        }
+        UpdateGuide();
+        guide.Show();
+        guideTimer.Start();
+        Log("위치 설정 시작");
+    }
+
+    static void UpdateGuide()
+    {
+        Point client;
+        IntPtr hwnd = RobloxUnderCursor(out client);
+        string where = hwnd == IntPtr.Zero ? "커서가 Roblox 창 위에 없어요" : "커서: Roblox 창 안 (" + client.X + ", " + client.Y + ")";
+        guide.Message = "위치 설정 (" + (calPoints.Count + 1) + "/" + calSteps.Length + ")\n"
+            + calSteps[calPoints.Count] + "에 마우스를 올리고 Space를 누르세요.\n"
+            + "Esc: 취소\n\n" + where + (calNote.Length > 0 ? "\n" + calNote : "");
+    }
+
+    // 커서 아래가 Roblox 창이면 그 창과 창 안쪽 좌표를 돌려준다
+    static IntPtr RobloxUnderCursor(out Point client)
+    {
+        client = Point.Empty;
+        POINT p;
+        GetCursorPos(out p);
+        IntPtr hwnd = GetAncestor(WindowFromPoint(p), GA_ROOT);
+        if (!IsTargetWindow(hwnd)) return IntPtr.Zero;
+        ScreenToClient(hwnd, ref p);
+        client = new Point(p.X, p.Y);
+        return hwnd;
+    }
+
+    static void CaptureCalPoint()
+    {
+        Point client;
+        IntPtr hwnd = RobloxUnderCursor(out client);
+        if (hwnd == IntPtr.Zero || (calHwnd != IntPtr.Zero && hwnd != calHwnd))
+        {
+            calNote = "Roblox 창 위에서 눌러 주세요.";
+            UpdateGuide();
+            return;
+        }
+        calHwnd = hwnd;
+        calNote = "";
+        calPoints.Add(client);
+        if (calPoints.Count == 2 && Math.Abs(calPoints[1].X - calPoints[0].X) < 20)
+        {
+            calPoints.Clear();
+            calNote = "막대 양 끝이 너무 가까워요. 처음부터 다시 해 주세요.";
+        }
+        if (calPoints.Count < calSteps.Length) { UpdateGuide(); return; }
+        FinishCalibration();
+    }
+
+    static void FinishCalibration()
+    {
+        Point a = calPoints[0], b = calPoints[1], c1 = calPoints[4], c2 = calPoints[5];
+        sliderLeft = Math.Min(a.X, b.X);
+        sliderRight = Math.Max(a.X, b.X);
+        sliderY = (a.Y + b.Y) / 2;
+        minusButton = calPoints[2];
+        plusButton = calPoints[3];
+        chatBox = Rectangle.FromLTRB(Math.Min(c1.X, c2.X), Math.Min(c1.Y, c2.Y), Math.Max(c1.X, c2.X), Math.Max(c1.Y, c2.Y));
+        RECT r;
+        GetClientRect(calHwnd, out r);
+        windowWidth = r.Right;
+        windowHeight = r.Bottom;
+
+        var values = new Dictionary<string, int>
+        {
+            { "SliderLeft", sliderLeft }, { "SliderRight", sliderRight }, { "SliderY", sliderY },
+            { "MinusX", minusButton.X }, { "MinusY", minusButton.Y }, { "PlusX", plusButton.X }, { "PlusY", plusButton.Y },
+            { "ChatLeft", chatBox.Left }, { "ChatTop", chatBox.Top }, { "ChatRight", chatBox.Right }, { "ChatBottom", chatBox.Bottom },
+            { "WindowWidth", windowWidth }, { "WindowHeight", windowHeight }
+        };
+        string result = "위치 설정 완료! F5를 눌러 속도가 0.5로 바뀌는지 확인해 보세요.";
+        try { SaveIni(values); }
+        catch (Exception ex) { result = "위치는 적용했지만 설정 파일 저장에 실패했어요. (" + ex.Message + ")"; }
+        Log("위치 설정 완료: 막대 " + sliderLeft + "~" + sliderRight + " y" + sliderY + " / - " + minusButton +
+            " / + " + plusButton + " / 채팅 " + chatBox + " / 창 " + windowWidth + "x" + windowHeight);
+        EndCalibration(result);
+    }
+
+    static void EndCalibration(string message)
+    {
+        calibrating = false;
+        guideTimer.Stop();
+        guide.Hide();
+        tray.ShowBalloonTip(4000, "DJ 배속", message, ToolTipIcon.Info);
+    }
+
+    static void Worker()
+    {
+        foreach (Action job in jobs.GetConsumingEnumerable())
+            job();
+    }
+
+    // 슬라이더 막대에서 배속 lv(0~10) 자리를 클릭한다. 양 끝은 막대 밖으로 빗나가지 않게 3px 안쪽을 누른다.
+    static void ClickSlider(IntPtr hwnd, int lv)
+    {
+        int x = sliderLeft + (sliderRight - sliderLeft) * lv / 10;
+        x = Math.Max(sliderLeft + 3, Math.Min(sliderRight - 3, x));
+        ClickClient(hwnd, new Point(x, sliderY), "배속 x" + Fmt(lv));
+    }
+
+    static void ClickClient(IntPtr hwnd, Point client, string what)
+    {
+        var p = new POINT { X = client.X, Y = client.Y };
+        ClientToScreen(hwnd, ref p);
+        ClickAndReturn(p.X, p.Y);
+        Log(what + " 클릭 (창 " + client.X + "," + client.Y + " / 화면 " + p.X + "," + p.Y + ")");
+    }
+
+    // 화면 좌표 (x, y)를 클릭하고 마우스를 원래 자리로 되돌린다.
+    static void ClickAndReturn(int x, int y)
+    {
+        POINT back;
+        GetCursorPos(out back);
+        MoveTo(x, y); Thread.Sleep(clickDelay);
+        SendMouse(0, 0, MOUSEEVENTF_LEFTDOWN); Thread.Sleep(clickDelay);
+        SendMouse(0, 0, MOUSEEVENTF_LEFTUP); Thread.Sleep(clickDelay);
+        MoveTo(back.X, back.Y);
+    }
+
+    // Roblox는 절대 좌표 이동(SendInput ABSOLUTE)을 가끔 못 알아채고 클릭을 원래 커서 자리에 처리한다.
+    // 그래서 커서를 직접 옮긴 뒤, 실제 마우스처럼 1px 상대 이동 신호를 보내 새 위치를 읽게 한다.
+    static void MoveTo(int x, int y)
+    {
+        SetCursorPos(x, y);
+        SendMouse(1, 0, MOUSEEVENTF_MOVE);
+        SendMouse(-1, 0, MOUSEEVENTF_MOVE);
+    }
+
+    static void SendMouse(int dx, int dy, uint flags)
+    {
+        var input = new INPUT { type = INPUT_MOUSE, mi = new MOUSEINPUT { dx = dx, dy = dy, dwFlags = flags } };
+        SendInput(1, new[] { input }, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    static void LoadIni()
+    {
+        string dir = AppDomain.CurrentDomain.BaseDirectory;
+        logPath = Path.Combine(dir, "DjSpeed.log");
+        iniPath = Path.Combine(dir, "DjSpeed.ini");
+        if (!File.Exists(iniPath)) return; // 설정 파일이 없으면 기본값으로 동작
+
+        int chatL = chatBox.Left, chatT = chatBox.Top, chatR = chatBox.Right, chatB = chatBox.Bottom;
+        bool sawWindow = false;
+        foreach (string raw in File.ReadAllLines(iniPath))
+        {
+            string line = raw.Trim();
+            int eq = line.IndexOf('=');
+            if (eq < 0 || line.StartsWith(";") || line.StartsWith("[")) continue;
+            string key = line.Substring(0, eq).Trim();
+            string val = line.Substring(eq + 1).Trim();
+            int n;
+            bool isInt = int.TryParse(val, out n);
+            if (key == "TargetProcess") targetProcess = val;
+            else if (key == "Debug") debug = val == "1";
+            else if (!isInt) continue; // 숫자가 아니면 기본값 유지
+            else if (key == "SliderLeft") sliderLeft = n;
+            else if (key == "SliderRight") sliderRight = n;
+            else if (key == "SliderY") sliderY = n;
+            else if (key == "MinusX") minusButton.X = n;
+            else if (key == "MinusY") minusButton.Y = n;
+            else if (key == "PlusX") plusButton.X = n;
+            else if (key == "PlusY") plusButton.Y = n;
+            else if (key == "ChatLeft") chatL = n;
+            else if (key == "ChatTop") chatT = n;
+            else if (key == "ChatRight") chatR = n;
+            else if (key == "ChatBottom") chatB = n;
+            else if (key == "WindowWidth") { windowWidth = n; sawWindow = true; }
+            else if (key == "WindowHeight") windowHeight = n;
+            else if (key == "ClickDelay") clickDelay = n;
+        }
+        chatBox = Rectangle.FromLTRB(chatL, chatT, chatR, chatB);
+        needsSetup = !sawWindow;
+    }
+
+    // 설정 파일의 해당 줄만 새 값으로 바꾸고(주석은 그대로), 없는 항목은 끝에 붙인다
+    static void SaveIni(Dictionary<string, int> values)
+    {
+        var lines = File.Exists(iniPath) ? new List<string>(File.ReadAllLines(iniPath)) : new List<string>();
+        var rest = new Dictionary<string, int>(values);
+        for (int i = 0; i < lines.Count; i++)
+        {
+            string line = lines[i].Trim();
+            int eq = line.IndexOf('=');
+            if (eq <= 0 || line.StartsWith(";")) continue;
+            string key = line.Substring(0, eq).Trim();
+            if (!rest.ContainsKey(key)) continue;
+            lines[i] = key + "=" + rest[key];
+            rest.Remove(key);
+        }
+        foreach (string key in values.Keys)
+            if (rest.ContainsKey(key)) lines.Add(key + "=" + rest[key]);
+        File.WriteAllLines(iniPath, lines.ToArray());
+    }
+
+    static void UpdateTray()
+    {
+        tray.Text = "DJ 배속 x" + Fmt(level);
+    }
+
+    static string Fmt(int lv)
+    {
+        return (lv / 10) + "." + (lv % 10);
+    }
+
+    static void Log(string s)
+    {
+        if (!debug) return;
+        File.AppendAllText(logPath, DateTime.Now.ToString("HH:mm:ss.fff") + " " + s + Environment.NewLine);
+    }
+}
+
+// 위치 설정 안내창: 화면 위쪽 가운데에 뜨고, Roblox에서 포커스를 뺏지 않는다
+class GuideForm : Form
+{
+    readonly Label label = new Label();
+
+    public GuideForm()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        BackColor = Color.FromArgb(32, 32, 40);
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        label.AutoSize = true;
+        label.ForeColor = Color.White;
+        label.Font = new Font("Malgun Gothic", 13f);
+        label.Padding = new Padding(18);
+        Controls.Add(label);
+    }
+
+    public string Message
+    {
+        set
+        {
+            if (label.Text == value) return;
+            label.Text = value;
+            PerformLayout();
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Top + 60);
+        }
+    }
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= 0x08000000 | 0x00000080 | 0x00000008; // WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST
+            return cp;
+        }
+    }
+}

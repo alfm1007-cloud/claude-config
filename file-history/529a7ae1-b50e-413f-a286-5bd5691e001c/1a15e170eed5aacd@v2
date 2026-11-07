@@ -1,0 +1,272 @@
+"""exe 새 기능 검증 (로블록스 아님, 기록용 테스트 창 대상).
+F 키 지정 / B 키 꾹 누르기 / C 키 짧게 / A 마우스 꾹 누르기(흔드는 중) / D 누르는 중 정지 / E 누르는 중 창 닫기"""
+import ctypes
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from ctypes import wintypes
+
+from rbx_lib import HERE, capture, cm, u
+from timing_exp_lib import DOWN, UP, send
+
+SRC_EXE = r"C:\Users\alfm1\Desktop\Claude\click-macro\클릭매크로.exe"
+TEST_DIR = os.path.join(HERE, "exe_hold")
+EXE = os.path.join(TEST_DIR, "클릭매크로.exe")
+CFG = os.path.join(TEST_DIR, "click_config.json")
+EVENTS = os.path.join(HERE, "hold_events.txt")
+TARGET = {"exe": os.path.basename(sys.executable), "title": "ClickMacroTestTarget"}
+
+u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, ctypes.c_void_p]
+u.SendMessageW.restype = ctypes.c_ssize_t
+u.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, ctypes.c_void_p,
+                                  wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+u.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+CB = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+u.EnumChildWindows.argtypes = [wintypes.HWND, CB, wintypes.LPARAM]
+
+results = []
+
+
+def check(name, cond, detail=""):
+    results.append(bool(cond))
+    print(f"  [{'PASS' if cond else 'FAIL'}] {name} {detail}")
+
+
+def text_of(h, timeout_ms=None):
+    buf = ctypes.create_unicode_buffer(512)
+    if timeout_ms is None:
+        u.SendMessageW(h, 0x000D, 512, ctypes.addressof(buf))
+        return buf.value
+    res = ctypes.c_size_t()
+    ok = u.SendMessageTimeoutW(h, 0x000D, 512, ctypes.addressof(buf), 0x0002, timeout_ms, ctypes.byref(res))
+    return buf.value if ok else None
+
+
+def children(h):
+    out = []
+
+    def cb(c, _):
+        cls = ctypes.create_unicode_buffer(128)
+        u.GetClassNameW(c, cls, 128)
+        out.append((c, cls.value.split(".")[1] if "." in cls.value else cls.value, text_of(c)))
+        return True
+
+    u.EnumChildWindows(h, CB(cb), 0)
+    return out
+
+
+def log_lines(hlist):
+    lines = []
+    for i in range(u.SendMessageW(hlist, 0x018B, 0, None)):
+        buf = ctypes.create_unicode_buffer(512)
+        u.SendMessageW(hlist, 0x0189, i, ctypes.addressof(buf))
+        lines.append(buf.value.split("  ", 1)[-1])
+    return lines
+
+
+def events():
+    if not os.path.exists(EVENTS):
+        return []
+    with open(EVENTS, encoding="utf-8") as f:
+        return [line.strip().split(",") for line in f if line.strip()]
+
+
+def wait_for(cond, timeout):
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        v = cond()
+        if v:
+            return v
+        time.sleep(0.03)
+    return None
+
+
+class Exe:
+    def __init__(self, cfg):
+        with open(CFG, "w", encoding="utf-8") as f:
+            json.dump(dict({"target": TARGET, "pos": [0.25, 0.75], "min": "0", "sec": "30"}, **cfg), f)
+        self.proc = subprocess.Popen([EXE], cwd=TEST_DIR)
+        win = wait_for(lambda: next((w for w in cm.list_windows() if w[2] == "클릭매크로.exe"), None), 10)
+        self.hwnd = win[0]
+        time.sleep(0.4)
+        self.kids = children(self.hwnd)
+        self.log = next(c for c, k, _ in self.kids if k == "LISTBOX")
+
+    def button(self, prefix):
+        return next(c for c, k, t in children(self.hwnd) if k == "BUTTON" and t.startswith(prefix))
+
+    def start(self):
+        u.PostMessageW(self.button("시작"), 0x00F5, 0, 0)
+
+    def lines(self):
+        return log_lines(self.log)
+
+    def close(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+        time.sleep(0.2)
+
+
+orig_fg = u.GetForegroundWindow()
+prev = wintypes.POINT()
+u.GetCursorPos(ctypes.byref(prev))
+os.makedirs(TEST_DIR, exist_ok=True)
+shutil.copy2(SRC_EXE, EXE)
+if os.path.exists(EVENTS):
+    os.remove(EVENTS)
+target = subprocess.Popen([sys.executable, os.path.join(HERE, "hold_target.py"), EVENTS])
+time.sleep(1.5)
+exe = None
+try:
+    # F. 키 지정: 키 칸을 실제로 클릭하고 Q를 누름
+    print("F. 키 지정 (키 칸 클릭 → Q)")
+    exe = Exe({"action": "key", "key": 0, "hold": "0"})
+    capture(exe.hwnd, "exe_hold_window.png")
+    keybox = next(c for c, k, t in exe.kids if k == "EDIT" and "키 입력" in t)
+    cm._activate(exe.hwnd)
+    time.sleep(0.2)
+    if u.GetForegroundWindow() == exe.hwnd:
+        r = wintypes.RECT()
+        u.GetWindowRect(keybox, ctypes.byref(r))
+        cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+        send(cx, cy, DOWN)
+        time.sleep(0.05)
+        send(cx, cy, UP)
+        time.sleep(0.2)
+        if u.GetForegroundWindow() == exe.hwnd:
+            u.keybd_event(0x51, 0, 0, 0)
+            time.sleep(0.05)
+            u.keybd_event(0x51, 0, 2, 0)
+        time.sleep(0.4)
+        check("키 칸 표시", text_of(keybox) == "Q", repr(text_of(keybox)))
+        check("로그", "키 지정: Q" in exe.lines(), str(exe.lines()[-2:]))
+        with open(CFG, encoding="utf-8") as f:
+            saved = json.load(f)
+        check("설정 저장", saved.get("key") == 81 and saved.get("action") == "key", f"key={saved.get('key')} action={saved.get('action')}")
+    else:
+        check("exe 창 활성화(사전조건)", False)
+    exe.close()
+
+    # B. 키 꾹 누르기 1.5초
+    print("B. 키 Q 1.5초 누르기")
+    n0 = len(events())
+    exe = Exe({"action": "key", "key": 81, "hold": "1.5"})
+    exe.start()
+    done = wait_for(lambda: any(l.endswith("누르기 완료") or "건너뜀" in l for l in exe.lines()), 6)
+    time.sleep(0.2)
+    ev = events()[n0:]
+    downs = [e for e in ev if e[0] == "kdown" and e[2].lower() == "q"]
+    ups = [e for e in ev if e[0] == "kup" and e[2].lower() == "q"]
+    check("로그", "1.5초 누르기 완료" in exe.lines(), str(exe.lines()))
+    check("누름 1번 · 뗌 1번 (자동 반복 없음)", len(downs) == 1 and len(ups) == 1, f"누름 {len(downs)} 뗌 {len(ups)}")
+    if downs and ups:
+        d = float(ups[0][1]) - float(downs[0][1])
+        check("누른 시간 1.5초 (±0.1)", abs(d - 1.5) <= 0.1, f"{d:.3f}s")
+    exe.close()
+
+    # C. 키 짧게
+    print("C. 키 Q 짧게 (누르는 시간 0)")
+    n0 = len(events())
+    exe = Exe({"action": "key", "key": 81, "hold": "0"})
+    exe.start()
+    wait_for(lambda: any("완료" in l or "건너뜀" in l for l in exe.lines()), 6)
+    time.sleep(0.2)
+    ev = events()[n0:]
+    downs = [e for e in ev if e[0] == "kdown" and e[2].lower() == "q"]
+    ups = [e for e in ev if e[0] == "kup" and e[2].lower() == "q"]
+    check("로그", "키 입력 완료" in exe.lines(), str(exe.lines()))
+    if len(downs) == 1 and len(ups) == 1:
+        d = float(ups[0][1]) - float(downs[0][1])
+        check("짧게 1번", d < 0.3, f"{d:.3f}s")
+    else:
+        check("짧게 1번", False, f"누름 {len(downs)} 뗌 {len(ups)}")
+    exe.close()
+
+    # A. 마우스 꾹 누르기 2초, 그동안 마우스를 계속 흔듦
+    print("A. 마우스 2초 누르기 (마우스 흔드는 중)")
+    n0 = len(events())
+    exe = Exe({"action": "mouse", "hold": "2"})
+    stop = threading.Event()
+
+    def shaker():
+        i = 0
+        while not stop.is_set():
+            u.mouse_event(cm.MOUSEEVENTF_MOVE, 5 if (i // 40) % 2 == 0 else -5, 3 if (i // 25) % 2 == 0 else -3, 0, 0)
+            i += 1
+            time.sleep(0.004)
+
+    threading.Thread(target=shaker, daemon=True).start()
+    exe.start()
+    wait_for(lambda: any("완료" in l or "건너뜀" in l for l in exe.lines()), 7)
+    stop.set()
+    time.sleep(0.2)
+    ev = events()[n0:]
+    downs = [e for e in ev if e[0] == "mdown"]
+    ups = [e for e in ev if e[0] == "mup"]
+    check("로그", "2초 누르기 완료" in exe.lines(), str(exe.lines()))
+    if len(downs) == 1 and len(ups) == 1:
+        d = float(ups[0][1]) - float(downs[0][1])
+        check("누른 시간 2초 (±0.1)", abs(d - 2.0) <= 0.1, f"{d:.3f}s")
+        check("누른 위치 정확", downs[0][2:] == ["0.2500", "0.7500"], str(downs[0][2:]))
+        check("뗀 위치 정확", ups[0][2:] == ["0.2500", "0.7500"], str(ups[0][2:]))
+    else:
+        check("누름/뗌 1번씩", False, f"누름 {len(downs)} 뗌 {len(ups)}")
+    exe.close()
+
+    # D. 10초 누르는 중 1초 뒤 정지 버튼
+    print("D. 마우스 10초 누르는 중 정지")
+    n0 = len(events())
+    exe = Exe({"action": "mouse", "hold": "10"})
+    status = next(c for c, k, t in exe.kids if k == "STATIC" and t == "정지됨")
+    exe.start()
+    down = wait_for(lambda: next((e for e in events()[n0:] if e[0] == "mdown"), None), 5)
+    time.sleep(1.0)
+    st = text_of(status, timeout_ms=300)
+    check("누르는 중에도 창이 응답 (0.3초 안에)", st is not None, repr(st))
+    t_stop = time.perf_counter()
+    u.PostMessageW(exe.button("정지"), 0x00F5, 0, 0)
+    up = wait_for(lambda: next((e for e in events()[n0:] if e[0] == "mup"), None), 3)
+    time.sleep(0.3)
+    if down and up:
+        held = float(up[1]) - float(down[1])
+        check("정지 직후 뗌 (10초 안 기다림)", held < 2.0, f"누른 시간 {held:.2f}s")
+    else:
+        check("정지 직후 뗌", False, f"down={down} up={up}")
+    check("로그: 정지 → 누르기 중단", "정지" in exe.lines() and "누르기 중단" in exe.lines(), str(exe.lines()))
+    exe.close()
+
+    # E. 키 10초 누르는 중 창 닫기
+    print("E. 키 10초 누르는 중 창 닫기")
+    n0 = len(events())
+    exe = Exe({"action": "key", "key": 81, "hold": "10"})
+    exe.start()
+    down = wait_for(lambda: next((e for e in events()[n0:] if e[0] == "kdown" and e[2].lower() == "q"), None), 5)
+    time.sleep(1.0)
+    u.PostMessageW(exe.hwnd, 0x0010, 0, 0)    # WM_CLOSE
+    exited = wait_for(lambda: exe.proc.poll() is not None, 4)
+    up = wait_for(lambda: next((e for e in events()[n0:] if e[0] == "kup" and e[2].lower() == "q"), None), 1)
+    print("    E 기록:", [(e[0], e[2]) for e in events()[n0:]])
+    check("창이 닫힘", exited)
+    if down and up:
+        held = float(up[1]) - float(down[1])
+        check("닫을 때 키를 뗌", held < 2.0, f"누른 시간 {held:.2f}s")
+    else:
+        check("닫을 때 키를 뗌", False, f"down={down} up={up}")
+    exe.close()
+finally:
+    if exe:
+        exe.close()
+    target.kill()
+    u.SetCursorPos(prev.x, prev.y)
+    time.sleep(0.2)
+    if orig_fg:
+        cm._activate(orig_fg)
+
+print(f"\n결과: {sum(results)}/{len(results)} PASS")

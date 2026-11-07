@@ -1,0 +1,135 @@
+"""exe 종단 검증: 격리 폴더에서 exe 실행 → 시작 버튼 클릭(F8 미사용) → 로블록스 채팅 아이콘 1회 클릭 확인.
+인자: covered | min"""
+import ctypes
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from ctypes import wintypes
+
+from rbx_lib import HERE, capture, cm, roblox_hwnd, u
+
+mode = sys.argv[1]
+tag = sys.argv[2]
+shake = len(sys.argv) > 3 and sys.argv[3] == "shake"
+SRC_EXE = r"C:\Users\alfm1\Desktop\Claude\click-macro\클릭매크로.exe"
+TEST_DIR = os.path.join(HERE, "exe_test")
+EXE = os.path.join(TEST_DIR, "클릭매크로.exe")
+CFG = os.path.join(TEST_DIR, "click_config.json")
+CROP = (0, 0, 420, 310)
+
+u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, ctypes.c_void_p]
+u.SendMessageW.restype = ctypes.c_ssize_t
+u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+CB = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+u.EnumChildWindows.argtypes = [wintypes.HWND, CB, wintypes.LPARAM]
+WM_GETTEXT, BM_CLICK, LB_GETTEXT, LB_GETCOUNT = 0x000D, 0x00F5, 0x0189, 0x018B
+
+
+def text_of(h):
+    buf = ctypes.create_unicode_buffer(512)
+    u.SendMessageW(h, WM_GETTEXT, 512, ctypes.addressof(buf))
+    return buf.value
+
+
+def children(h):
+    out = []
+
+    def cb(c, _):
+        cls = ctypes.create_unicode_buffer(128)
+        u.GetClassNameW(c, cls, 128)
+        kind = cls.value.split(".")[1] if "." in cls.value else cls.value
+        out.append((c, kind, text_of(c)))
+        return True
+
+    u.EnumChildWindows(h, CB(cb), 0)
+    return out
+
+
+def log_lines(hlist):
+    lines = []
+    for i in range(u.SendMessageW(hlist, LB_GETCOUNT, 0, None)):
+        buf = ctypes.create_unicode_buffer(512)
+        u.SendMessageW(hlist, LB_GETTEXT, i, ctypes.addressof(buf))
+        lines.append(buf.value)
+    return lines
+
+
+os.makedirs(TEST_DIR, exist_ok=True)
+shutil.copy2(SRC_EXE, EXE)
+with open(CFG, "w", encoding="utf-8") as f:     # 파이썬 버전이 쓰는 형식 그대로 → 설정 호환 확인 겸용
+    json.dump({"target": {"exe": "RobloxPlayerBeta.exe", "title": "Roblox"},
+               "pos": [139 / 800, 35 / 599], "min": "0", "sec": "30"}, f, ensure_ascii=False, indent=2)
+
+rbx = roblox_hwnd()
+orig_fg = u.GetForegroundWindow()
+_r = wintypes.RECT()
+u.GetClientRect(rbx, ctypes.byref(_r))
+_c = wintypes.POINT()
+u.GetCursorPos(ctypes.byref(_c))
+u.ScreenToClient(rbx, ctypes.byref(_c))
+print(f"로블록스 안쪽 크기 {_r.right}x{_r.bottom} | 현재 마우스(창 기준) ({_c.x},{_c.y})")
+if mode == "min":
+    u.ShowWindow(rbx, cm.SW_MINIMIZE)
+    time.sleep(0.8)
+fg_before = u.GetForegroundWindow()
+print(f"[{mode}] 로블록스 최소화: {bool(u.IsIconic(rbx))} | 로블록스가 맨 앞: {fg_before == rbx}")
+
+proc = subprocess.Popen([EXE], cwd=TEST_DIR)
+try:
+    t0 = time.monotonic()
+    win = None
+    while time.monotonic() - t0 < 10 and not win:
+        time.sleep(0.05)
+        win = next((w for w in cm.list_windows() if w[2] == "클릭매크로.exe"), None)
+    print(f"exe 창 뜨는 데 {time.monotonic() - t0:.2f}s | 제목: {win[1]!r}")
+    hwnd = win[0]
+    time.sleep(0.3)
+    kids = children(hwnd)
+    for _, kind, text in kids:
+        if kind != "LISTBOX":
+            print(f"   {kind:9} {text!r}")
+    start =next(c for c, kind, text in kids if kind == "BUTTON" and text.startswith("시작"))
+    hlist = next(c for c, kind, _ in kids if kind == "LISTBOX")
+    # 사용자가 마우스를 계속 움직이는 상황을 흉내: 4ms마다 5px씩 좌우로 왕복 (초당 약 1000px)
+    stop = threading.Event()
+
+    def shaker():
+        i = 0
+        while not stop.is_set():
+            u.mouse_event(cm.MOUSEEVENTF_MOVE, 5 if (i // 40) % 2 == 0 else -5, 0, 0, 0)
+            i += 1
+            time.sleep(0.004)
+
+    if shake:
+        threading.Thread(target=shaker, daemon=True).start()
+    u.PostMessageW(start, BM_CLICK, 0, 0)
+    t_click = time.monotonic()
+    while time.monotonic() - t_click < 4 and not any(s.endswith("클릭 완료") for s in log_lines(hlist)):
+        time.sleep(0.05)
+    time.sleep(0.2)
+    stop.set()
+    print(f"마우스 흔들기: {shake} | 시작 버튼 → '클릭 완료' 로그까지 {time.monotonic() - t_click:.2f}s")
+    if mode == "covered":
+        time.sleep(0.4)
+        capture(rbx, f"exe_{tag}.png")[0].crop(CROP).save(f"exe_{tag}_crop.png")      # 클릭 약 0.6초 뒤
+    time.sleep(1.5)
+    kids = children(hwnd)
+    print("시작 후 버튼/상태:", [text for _, kind, text in kids if text.startswith(("정지", "실행", "시작"))])
+    print("로그:", log_lines(hlist))
+    print(f"맨 앞 창 복귀: {u.GetForegroundWindow() == fg_before} | 로블록스 최소화 상태 유지: {bool(u.IsIconic(rbx)) == (mode == 'min')}")
+    with open(CFG, encoding="utf-8") as f:
+        print("exe가 다시 쓴 설정(파이썬 json으로 읽힘):", json.load(f))
+finally:
+    proc.kill()
+
+if mode == "min":
+    u.ShowWindow(rbx, 4)          # 활성화 없이 원래 크기로 복원 (처음 상태로 되돌림)
+    time.sleep(1.0)
+    cm._activate(orig_fg if orig_fg else fg_before)    # 테스트 전 맨 앞이던 창으로 되돌림
+    time.sleep(0.5)
+    capture(rbx, f"exe_{tag}.png")[0].crop(CROP).save(f"exe_{tag}_crop.png")

@@ -1,0 +1,49 @@
+param([string]$OutFile)
+# Chat-mode test window at (0,0): checks Q/E/T are blocked normally and pass through while "chatting".
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public static class W {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, UIntPtr e);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref P p);
+  public struct P { public int X, Y; }
+}
+"@
+[W]::SetProcessDPIAware() | Out-Null
+$log = New-Object System.Collections.Generic.List[string]
+$state = @{ result = "TIMEOUT" }
+$f = New-Object System.Windows.Forms.Form
+$f.Text = "DjSpeed chat test"; $f.TopMost = $true; $f.FormBorderStyle = 'FixedSingle'
+$f.StartPosition = 'Manual'; $f.Location = New-Object System.Drawing.Point 0, 0
+$f.ClientSize = New-Object System.Drawing.Size 800, 650
+$f.Add_KeyDown({ param($s, $e) $log.Add("key:" + $e.KeyCode); $e.SuppressKeyPress = $true })
+$f.Add_KeyUp({ param($s, $e) $e.Handled = $true })
+$f.Add_MouseDown({ param($s, $e) $log.Add("click:$($e.X),$($e.Y)") })
+function Wait($ms) { $sw = [Diagnostics.Stopwatch]::StartNew(); while ($sw.ElapsedMilliseconds -lt $ms) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 10 } }
+function Key($k) { $log.Add("send:" + $k); [System.Windows.Forms.SendKeys]::SendWait($k); Wait 250 }
+function ClickAt($cx, $cy) {
+  $p = New-Object W+P; $p.X = $cx; $p.Y = $cy; [W]::ClientToScreen($f.Handle, [ref]$p) | Out-Null
+  $log.Add("send:click $cx,$cy"); [W]::SetCursorPos($p.X, $p.Y) | Out-Null; Wait 30
+  [W]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero); [W]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero); Wait 250
+}
+$t = New-Object System.Windows.Forms.Timer; $t.Interval = 400
+$t.Add_Tick({
+  $t.Stop()
+  [W]::SetForegroundWindow($f.Handle) | Out-Null
+  if ([W]::GetForegroundWindow() -ne $f.Handle) { $state.result = "NOT_FOREGROUND"; $f.Close(); return }
+  [W]::SetCursorPos(600, 300) | Out-Null; Wait 50          # park cursor inside the window
+  Key "q"; Key "e"; Key "t"                                   # hotkeys: blocked, clicks -, +, slider
+  Key "/"; Key "q"; Key "{ENTER}"; Key "t"                    # chat via '/': q passes, Enter ends, t blocked again
+  ClickAt 100 470; Key "e"                                    # click chat box: e passes
+  ClickAt 100 600; Key "e"                                    # click elsewhere: e blocked again
+  Key "/"; Key "{ESC}"; Key "q"                               # Esc ends chat: q blocked
+  if ([W]::GetForegroundWindow() -ne $f.Handle) { $state.result = "LOST_FOCUS" } else { $state.result = "OK" }
+  $f.Close()
+})
+$f.Add_Shown({ $f.Activate(); $t.Start() })
+[System.Windows.Forms.Application]::Run($f)
+(@("result: " + $state.result) + $log) | Set-Content $OutFile

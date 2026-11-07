@@ -1,0 +1,36 @@
+"""진단: 클릭 없이 지정 지점에 마우스만 올려 두고(1.2초) 로블록스가 어디를 가리킨다고 보는지 툴팁으로 확인."""
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+
+from rbx_lib import capture, cm, roblox_hwnd, u
+
+x, y = int(sys.argv[1]), int(sys.argv[2])
+h = roblox_hwnd()
+prev_fg = u.GetForegroundWindow()
+prev = wintypes.POINT()
+u.GetCursorPos(ctypes.byref(prev))
+rect = wintypes.RECT()
+u.GetClientRect(h, ctypes.byref(rect))
+print(f"안쪽 크기 {rect.right}x{rect.bottom} | 최소화 {bool(u.IsIconic(h))} | 로블록스가 맨 앞 {prev_fg == h}")
+try:
+    print("앞으로 가져오기:", cm._activate(h))
+    time.sleep(0.2)
+    pt = wintypes.POINT(x, y)
+    u.ClientToScreen(h, ctypes.byref(pt))
+    u.SetCursorPos(pt.x, pt.y)
+    time.sleep(0.03)
+    u.mouse_event(cm.MOUSEEVENTF_MOVE, 1, 0, 0, 0)
+    time.sleep(0.03)
+    u.mouse_event(cm.MOUSEEVENTF_MOVE, -1, 0, 0, 0)
+    time.sleep(1.2)
+    now = wintypes.POINT()
+    u.GetCursorPos(ctypes.byref(now))
+    u.ScreenToClient(h, ctypes.byref(now))
+    print(f"올려 둔 뒤 실제 마우스 위치(창 기준): ({now.x},{now.y})  목표 ({x},{y})")
+    capture(h, "hover.png")[0].crop((0, 0, 420, 200)).save("hover_crop.png")
+finally:
+    u.SetCursorPos(prev.x, prev.y)
+    if prev_fg and prev_fg != h:
+        cm._activate(prev_fg)
